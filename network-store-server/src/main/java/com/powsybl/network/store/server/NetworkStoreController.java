@@ -6,11 +6,15 @@
  */
 package com.powsybl.network.store.server;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.powsybl.commons.PowsyblException;
 import com.powsybl.commons.exceptions.UncheckedInterruptedException;
 import com.powsybl.network.store.model.*;
 import com.powsybl.network.store.model.svattributes.*;
 import com.powsybl.network.store.server.dto.AllCollectionsBundle;
+import com.powsybl.network.store.server.dto.BulkUpdateBundle;
+import com.powsybl.network.store.server.dto.BulkUpdateEntry;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -22,6 +26,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.*;
 import java.util.concurrent.ExecutionException;
@@ -47,6 +52,9 @@ public class NetworkStoreController {
 
     @Autowired
     private NetworkStoreObserver networkStoreObserver;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     private <T extends IdentifiableAttributes> ResponseEntity<TopLevelDocument<T>> get(Supplier<Optional<Resource<T>>> f) {
         Optional<Resource<T>> optResource = networkStoreObserver.observeOne("get", f::get);
@@ -229,8 +237,9 @@ public class NetworkStoreController {
         ResourceType.LINE,
         ResourceType.TWO_WINDINGS_TRANSFORMER);
 
-    // the per collection queries of the collections endpoint are independent: they run in parallel
-    // on this pool (each task takes a connection from the datasource pool, so keep it smaller)
+    // the per collection queries of the collections endpoint, and the per resource type groups of
+    // the bulk update endpoint, are independent: they run in parallel on this pool (each task takes
+    // a connection from the datasource pool, so keep it smaller)
     private final ExecutorService collectionsExecutor = Executors.newFixedThreadPool(8);
 
     @PreDestroy
@@ -296,6 +305,178 @@ public class NetworkStoreController {
         } catch (ExecutionException e) {
             throw new PowsyblException("Error loading all the collections of network " + networkId + " variant " + variantNum, e.getCause());
         }
+    }
+
+    // bulk update: all the buffered collection changes in one round trip
+
+    @PostMapping(value = "/{networkId}/{variantNum}/bulk-update", consumes = APPLICATION_JSON_VALUE)
+    @Operation(summary = "Apply a batch of collection changes (create/update/remove) in a single call")
+    @ApiResponses(value = {
+        @ApiResponse(responseCode = "200", description = "Successfully applied the bulk update"),
+        @ApiResponse(responseCode = "400", description = "Invalid request payload")
+    })
+    public ResponseEntity<Void> bulkUpdate(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+                                           @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
+                                           @Parameter(description = "Bulk update bundle", required = true) @RequestBody BulkUpdateBundle bundle) {
+        // first pass: validate every entry and build, per resource type, the ordered list of
+        // repository calls to apply; nothing is applied if any entry is invalid
+        Map<ResourceType, List<Runnable>> tasksByType = new EnumMap<>(ResourceType.class);
+        if (bundle.getEntries() != null) {
+            for (BulkUpdateEntry entry : bundle.getEntries()) {
+                Runnable task = toBulkUpdateTask(networkId, variantNum, entry);
+                tasksByType.computeIfAbsent(entry.getResourceType(), k -> new ArrayList<>()).add(task);
+            }
+        }
+        // second pass: the groups are independent (each resource type has its own tables), so they
+        // run in parallel like the per type flushes the client used to send concurrently; within a
+        // group the entries are applied in their original order
+        List<Future<?>> futures = new ArrayList<>();
+        for (List<Runnable> tasks : tasksByType.values()) {
+            futures.add(collectionsExecutor.submit(() -> tasks.forEach(Runnable::run)));
+        }
+        try {
+            for (Future<?> future : futures) {
+                future.get();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new UncheckedInterruptedException(e);
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof ResponseStatusException responseStatusException) {
+                throw responseStatusException;
+            }
+            throw new PowsyblException("Error applying bulk update to network " + networkId + " variant " + variantNum, e.getCause());
+        }
+        return ResponseEntity.ok().build();
+    }
+
+    private static ResponseStatusException unsupportedBulkUpdateEntry(BulkUpdateEntry entry) {
+        return new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported bulk update entry: resourceType=" + entry.getResourceType()
+                + ", operation=" + entry.getOperation() + ", attributeFilter=" + entry.getAttributeFilter());
+    }
+
+    private Runnable toBulkUpdateTask(UUID networkUuid, int variantNum, BulkUpdateEntry entry) {
+        if (entry.getResourceType() == null || entry.getOperation() == null) {
+            throw unsupportedBulkUpdateEntry(entry);
+        }
+        return switch (entry.getOperation()) {
+            case "CREATE" -> bulkCreateTask(networkUuid, entry);
+            case "UPDATE" -> {
+                if (entry.getAttributeFilter() == null) {
+                    yield bulkUpdateTask(networkUuid, entry);
+                } else if ("SV".equals(entry.getAttributeFilter())) {
+                    yield bulkUpdateSvTask(networkUuid, entry);
+                } else {
+                    throw unsupportedBulkUpdateEntry(entry);
+                }
+            }
+            case "REMOVE" -> bulkRemoveTask(networkUuid, variantNum, entry);
+            default -> throw unsupportedBulkUpdateEntry(entry);
+        };
+    }
+
+    private <T extends Attributes> Runnable observeBulk(String name, BulkUpdateEntry entry, TypeReference<List<Resource<T>>> typeReference, Consumer<List<Resource<T>>> f) {
+        List<Resource<T>> resources = objectMapper.convertValue(entry.getBody(), typeReference);
+        return () -> networkStoreObserver.observe(name, entry.getResourceType(), resources.size(), () -> f.accept(resources));
+    }
+
+    private Runnable bulkCreateTask(UUID networkUuid, BulkUpdateEntry entry) {
+        return switch (entry.getResourceType()) {
+            case SUBSTATION -> observeBulk("create.all", entry, new TypeReference<List<Resource<SubstationAttributes>>>() { }, resources -> repository.createSubstations(networkUuid, resources));
+            case VOLTAGE_LEVEL -> observeBulk("create.all", entry, new TypeReference<List<Resource<VoltageLevelAttributes>>>() { }, resources -> repository.createVoltageLevels(networkUuid, resources));
+            case GENERATOR -> observeBulk("create.all", entry, new TypeReference<List<Resource<GeneratorAttributes>>>() { }, resources -> repository.createGenerators(networkUuid, resources));
+            case BATTERY -> observeBulk("create.all", entry, new TypeReference<List<Resource<BatteryAttributes>>>() { }, resources -> repository.createBatteries(networkUuid, resources));
+            case LOAD -> observeBulk("create.all", entry, new TypeReference<List<Resource<LoadAttributes>>>() { }, resources -> repository.createLoads(networkUuid, resources));
+            case SHUNT_COMPENSATOR -> observeBulk("create.all", entry, new TypeReference<List<Resource<ShuntCompensatorAttributes>>>() { }, resources -> repository.createShuntCompensators(networkUuid, resources));
+            case VSC_CONVERTER_STATION -> observeBulk("create.all", entry, new TypeReference<List<Resource<VscConverterStationAttributes>>>() { }, resources -> repository.createVscConverterStations(networkUuid, resources));
+            case LCC_CONVERTER_STATION -> observeBulk("create.all", entry, new TypeReference<List<Resource<LccConverterStationAttributes>>>() { }, resources -> repository.createLccConverterStations(networkUuid, resources));
+            case STATIC_VAR_COMPENSATOR -> observeBulk("create.all", entry, new TypeReference<List<Resource<StaticVarCompensatorAttributes>>>() { }, resources -> repository.createStaticVarCompensators(networkUuid, resources));
+            case BUSBAR_SECTION -> observeBulk("create.all", entry, new TypeReference<List<Resource<BusbarSectionAttributes>>>() { }, resources -> repository.createBusbarSections(networkUuid, resources));
+            case SWITCH -> observeBulk("create.all", entry, new TypeReference<List<Resource<SwitchAttributes>>>() { }, resources -> repository.createSwitches(networkUuid, resources));
+            case TWO_WINDINGS_TRANSFORMER -> observeBulk("create.all", entry, new TypeReference<List<Resource<TwoWindingsTransformerAttributes>>>() { }, resources -> repository.createTwoWindingsTransformers(networkUuid, resources));
+            case THREE_WINDINGS_TRANSFORMER -> observeBulk("create.all", entry, new TypeReference<List<Resource<ThreeWindingsTransformerAttributes>>>() { }, resources -> repository.createThreeWindingsTransformers(networkUuid, resources));
+            case LINE -> observeBulk("create.all", entry, new TypeReference<List<Resource<LineAttributes>>>() { }, resources -> repository.createLines(networkUuid, resources));
+            case HVDC_LINE -> observeBulk("create.all", entry, new TypeReference<List<Resource<HvdcLineAttributes>>>() { }, resources -> repository.createHvdcLines(networkUuid, resources));
+            case BOUNDARY_LINE -> observeBulk("create.all", entry, new TypeReference<List<Resource<BoundaryLineAttributes>>>() { }, resources -> repository.createBoundaryLines(networkUuid, resources));
+            case TIE_LINE -> observeBulk("create.all", entry, new TypeReference<List<Resource<TieLineAttributes>>>() { }, resources -> repository.createTieLines(networkUuid, resources));
+            case CONFIGURED_BUS -> observeBulk("create.all", entry, new TypeReference<List<Resource<ConfiguredBusAttributes>>>() { }, resources -> repository.createBuses(networkUuid, resources));
+            case GROUND -> observeBulk("create.all", entry, new TypeReference<List<Resource<GroundAttributes>>>() { }, resources -> repository.createGrounds(networkUuid, resources));
+            case AREA -> observeBulk("create.all", entry, new TypeReference<List<Resource<AreaAttributes>>>() { }, resources -> repository.createAreas(networkUuid, resources));
+            default -> throw unsupportedBulkUpdateEntry(entry);
+        };
+    }
+
+    private Runnable bulkUpdateTask(UUID networkUuid, BulkUpdateEntry entry) {
+        return switch (entry.getResourceType()) {
+            case NETWORK -> observeBulk("update.all", entry, new TypeReference<List<Resource<NetworkAttributes>>>() { }, resources -> repository.updateNetworks(resources));
+            case SUBSTATION -> observeBulk("update.all", entry, new TypeReference<List<Resource<SubstationAttributes>>>() { }, resources -> repository.updateSubstations(networkUuid, resources));
+            case VOLTAGE_LEVEL -> observeBulk("update.all", entry, new TypeReference<List<Resource<VoltageLevelAttributes>>>() { }, resources -> repository.updateVoltageLevels(networkUuid, resources));
+            case GENERATOR -> observeBulk("update.all", entry, new TypeReference<List<Resource<GeneratorAttributes>>>() { }, resources -> repository.updateGenerators(networkUuid, resources));
+            case BATTERY -> observeBulk("update.all", entry, new TypeReference<List<Resource<BatteryAttributes>>>() { }, resources -> repository.updateBatteries(networkUuid, resources));
+            case LOAD -> observeBulk("update.all", entry, new TypeReference<List<Resource<LoadAttributes>>>() { }, resources -> repository.updateLoads(networkUuid, resources));
+            case SHUNT_COMPENSATOR -> observeBulk("update.all", entry, new TypeReference<List<Resource<ShuntCompensatorAttributes>>>() { }, resources -> repository.updateShuntCompensators(networkUuid, resources));
+            case VSC_CONVERTER_STATION -> observeBulk("update.all", entry, new TypeReference<List<Resource<VscConverterStationAttributes>>>() { }, resources -> repository.updateVscConverterStations(networkUuid, resources));
+            case LCC_CONVERTER_STATION -> observeBulk("update.all", entry, new TypeReference<List<Resource<LccConverterStationAttributes>>>() { }, resources -> repository.updateLccConverterStations(networkUuid, resources));
+            case STATIC_VAR_COMPENSATOR -> observeBulk("update.all", entry, new TypeReference<List<Resource<StaticVarCompensatorAttributes>>>() { }, resources -> repository.updateStaticVarCompensators(networkUuid, resources));
+            case BUSBAR_SECTION -> observeBulk("update.all", entry, new TypeReference<List<Resource<BusbarSectionAttributes>>>() { }, resources -> repository.updateBusbarSections(networkUuid, resources));
+            case SWITCH -> observeBulk("update.all", entry, new TypeReference<List<Resource<SwitchAttributes>>>() { }, resources -> repository.updateSwitches(networkUuid, resources));
+            case TWO_WINDINGS_TRANSFORMER -> observeBulk("update.all", entry, new TypeReference<List<Resource<TwoWindingsTransformerAttributes>>>() { }, resources -> repository.updateTwoWindingsTransformers(networkUuid, resources));
+            case THREE_WINDINGS_TRANSFORMER -> observeBulk("update.all", entry, new TypeReference<List<Resource<ThreeWindingsTransformerAttributes>>>() { }, resources -> repository.updateThreeWindingsTransformers(networkUuid, resources));
+            case LINE -> observeBulk("update.all", entry, new TypeReference<List<Resource<LineAttributes>>>() { }, resources -> repository.updateLines(networkUuid, resources));
+            case HVDC_LINE -> observeBulk("update.all", entry, new TypeReference<List<Resource<HvdcLineAttributes>>>() { }, resources -> repository.updateHvdcLines(networkUuid, resources));
+            case BOUNDARY_LINE -> observeBulk("update.all", entry, new TypeReference<List<Resource<BoundaryLineAttributes>>>() { }, resources -> repository.updateBoundaryLines(networkUuid, resources));
+            case TIE_LINE -> observeBulk("update.all", entry, new TypeReference<List<Resource<TieLineAttributes>>>() { }, resources -> repository.updateTieLines(networkUuid, resources));
+            case CONFIGURED_BUS -> observeBulk("update.all", entry, new TypeReference<List<Resource<ConfiguredBusAttributes>>>() { }, resources -> repository.updateBuses(networkUuid, resources));
+            case GROUND -> observeBulk("update.all", entry, new TypeReference<List<Resource<GroundAttributes>>>() { }, resources -> repository.updateGrounds(networkUuid, resources));
+            case AREA -> observeBulk("update.all", entry, new TypeReference<List<Resource<AreaAttributes>>>() { }, resources -> repository.updateAreas(networkUuid, resources));
+            default -> throw unsupportedBulkUpdateEntry(entry);
+        };
+    }
+
+    private Runnable bulkUpdateSvTask(UUID networkUuid, BulkUpdateEntry entry) {
+        return switch (entry.getResourceType()) {
+            case VOLTAGE_LEVEL -> observeBulk("update.all", entry, new TypeReference<List<Resource<VoltageLevelSvAttributes>>>() { }, resources -> repository.updateVoltageLevelsSv(networkUuid, resources));
+            case GENERATOR -> observeBulk("update.all", entry, new TypeReference<List<Resource<InjectionSvAttributes>>>() { }, resources -> repository.updateGeneratorsSv(networkUuid, resources));
+            case BATTERY -> observeBulk("update.all", entry, new TypeReference<List<Resource<InjectionSvAttributes>>>() { }, resources -> repository.updateBatteriesSv(networkUuid, resources));
+            case LOAD -> observeBulk("update.all", entry, new TypeReference<List<Resource<InjectionSvAttributes>>>() { }, resources -> repository.updateLoadsSv(networkUuid, resources));
+            case SHUNT_COMPENSATOR -> observeBulk("update.all", entry, new TypeReference<List<Resource<ShuntCompensatorSvAttributes>>>() { }, resources -> repository.updateShuntCompensatorsSv(networkUuid, resources));
+            case VSC_CONVERTER_STATION -> observeBulk("update.all", entry, new TypeReference<List<Resource<InjectionSvAttributes>>>() { }, resources -> repository.updateVscConverterStationsSv(networkUuid, resources));
+            case LCC_CONVERTER_STATION -> observeBulk("update.all", entry, new TypeReference<List<Resource<InjectionSvAttributes>>>() { }, resources -> repository.updateLccConverterStationsSv(networkUuid, resources));
+            case STATIC_VAR_COMPENSATOR -> observeBulk("update.all", entry, new TypeReference<List<Resource<InjectionSvAttributes>>>() { }, resources -> repository.updateStaticVarCompensatorsSv(networkUuid, resources));
+            case TWO_WINDINGS_TRANSFORMER -> observeBulk("update.all", entry, new TypeReference<List<Resource<TwoWindingsTransformerSvAttributes>>>() { }, resources -> repository.updateTwoWindingsTransformersSv(networkUuid, resources));
+            case THREE_WINDINGS_TRANSFORMER -> observeBulk("update.all", entry, new TypeReference<List<Resource<ThreeWindingsTransformerSvAttributes>>>() { }, resources -> repository.updateThreeWindingsTransformersSv(networkUuid, resources));
+            case LINE -> observeBulk("update.all", entry, new TypeReference<List<Resource<BranchSvAttributes>>>() { }, resources -> repository.updateLinesSv(networkUuid, resources));
+            case BOUNDARY_LINE -> observeBulk("update.all", entry, new TypeReference<List<Resource<InjectionSvAttributes>>>() { }, resources -> repository.updateBoundaryLinesSv(networkUuid, resources));
+            default -> throw unsupportedBulkUpdateEntry(entry);
+        };
+    }
+
+    private Runnable bulkRemoveTask(UUID networkUuid, int variantNum, BulkUpdateEntry entry) {
+        List<String> ids = objectMapper.convertValue(entry.getBody(), new TypeReference<List<String>>() { });
+        Consumer<List<String>> remover = switch (entry.getResourceType()) {
+            case SUBSTATION -> idList -> repository.deleteSubstations(networkUuid, variantNum, idList);
+            case VOLTAGE_LEVEL -> idList -> repository.deleteVoltageLevels(networkUuid, variantNum, idList);
+            case GENERATOR -> idList -> repository.deleteGenerators(networkUuid, variantNum, idList);
+            case BATTERY -> idList -> repository.deleteBatteries(networkUuid, variantNum, idList);
+            case LOAD -> idList -> repository.deleteLoads(networkUuid, variantNum, idList);
+            case SHUNT_COMPENSATOR -> idList -> repository.deleteShuntCompensators(networkUuid, variantNum, idList);
+            case VSC_CONVERTER_STATION -> idList -> repository.deleteVscConverterStations(networkUuid, variantNum, idList);
+            case LCC_CONVERTER_STATION -> idList -> repository.deleteLccConverterStations(networkUuid, variantNum, idList);
+            case STATIC_VAR_COMPENSATOR -> idList -> repository.deleteStaticVarCompensators(networkUuid, variantNum, idList);
+            case BUSBAR_SECTION -> idList -> repository.deleteBusBarSections(networkUuid, variantNum, idList);
+            case SWITCH -> idList -> repository.deleteSwitches(networkUuid, variantNum, idList);
+            case TWO_WINDINGS_TRANSFORMER -> idList -> repository.deleteTwoWindingsTransformers(networkUuid, variantNum, idList);
+            case THREE_WINDINGS_TRANSFORMER -> idList -> repository.deleteThreeWindingsTransformers(networkUuid, variantNum, idList);
+            case LINE -> idList -> repository.deleteLines(networkUuid, variantNum, idList);
+            case HVDC_LINE -> idList -> repository.deleteHvdcLines(networkUuid, variantNum, idList);
+            case BOUNDARY_LINE -> idList -> repository.deleteBoundaryLines(networkUuid, variantNum, idList);
+            case TIE_LINE -> idList -> repository.deleteTieLines(networkUuid, variantNum, idList);
+            case CONFIGURED_BUS -> idList -> repository.deleteBuses(networkUuid, variantNum, idList);
+            case GROUND -> idList -> repository.deleteGrounds(networkUuid, variantNum, idList);
+            case AREA -> idList -> repository.deleteAreas(networkUuid, variantNum, idList);
+            default -> throw unsupportedBulkUpdateEntry(entry);
+        };
+        return () -> networkStoreObserver.observe("remove.all", entry.getResourceType(), ids.size(), () -> remover.accept(ids));
     }
 
     // substation
