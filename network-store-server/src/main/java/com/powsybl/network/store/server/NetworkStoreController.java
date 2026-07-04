@@ -6,13 +6,17 @@
  */
 package com.powsybl.network.store.server;
 
+import com.powsybl.commons.PowsyblException;
+import com.powsybl.commons.exceptions.UncheckedInterruptedException;
 import com.powsybl.network.store.model.*;
 import com.powsybl.network.store.model.svattributes.*;
+import com.powsybl.network.store.server.dto.AllCollectionsBundle;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.annotation.PreDestroy;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -20,6 +24,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -191,6 +199,103 @@ public class NetworkStoreController {
                                              @Parameter(description = "Target variant Id", required = true) @PathVariable("targetVariantId") String targetVariantId,
                                              @Parameter(description = "mayOverwrite") @RequestParam(required = false) boolean mayOverwrite) {
         return clone(() -> repository.cloneNetwork(networkId, sourceVariantId, targetVariantId, mayOverwrite), 1);
+    }
+
+    // all collections in one round trip
+
+    private static final List<ResourceType> COLLECTION_RESOURCE_TYPES = List.of(
+        ResourceType.SUBSTATION,
+        ResourceType.VOLTAGE_LEVEL,
+        ResourceType.LOAD,
+        ResourceType.GENERATOR,
+        ResourceType.BATTERY,
+        ResourceType.SHUNT_COMPENSATOR,
+        ResourceType.VSC_CONVERTER_STATION,
+        ResourceType.LCC_CONVERTER_STATION,
+        ResourceType.STATIC_VAR_COMPENSATOR,
+        ResourceType.BUSBAR_SECTION,
+        ResourceType.SWITCH,
+        ResourceType.GROUND,
+        ResourceType.TWO_WINDINGS_TRANSFORMER,
+        ResourceType.THREE_WINDINGS_TRANSFORMER,
+        ResourceType.LINE,
+        ResourceType.HVDC_LINE,
+        ResourceType.BOUNDARY_LINE,
+        ResourceType.TIE_LINE,
+        ResourceType.CONFIGURED_BUS,
+        ResourceType.AREA);
+
+    private static final List<ResourceType> SELECTED_LIMITS_RESOURCE_TYPES = List.of(
+        ResourceType.LINE,
+        ResourceType.TWO_WINDINGS_TRANSFORMER);
+
+    // the per collection queries of the collections endpoint are independent: they run in parallel
+    // on this pool (each task takes a connection from the datasource pool, so keep it smaller)
+    private final ExecutorService collectionsExecutor = Executors.newFixedThreadPool(8);
+
+    @PreDestroy
+    void shutdownCollectionsExecutor() {
+        collectionsExecutor.shutdown();
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Resource<IdentifiableAttributes>> getCollection(ResourceType resourceType, UUID networkId, int variantNum) {
+        return (List<Resource<IdentifiableAttributes>>) (List<?>) switch (resourceType) {
+            case SUBSTATION -> repository.getSubstations(networkId, variantNum);
+            case VOLTAGE_LEVEL -> repository.getVoltageLevels(networkId, variantNum);
+            case LOAD -> repository.getLoads(networkId, variantNum);
+            case GENERATOR -> repository.getGenerators(networkId, variantNum);
+            case BATTERY -> repository.getBatteries(networkId, variantNum);
+            case SHUNT_COMPENSATOR -> repository.getShuntCompensators(networkId, variantNum);
+            case VSC_CONVERTER_STATION -> repository.getVscConverterStations(networkId, variantNum);
+            case LCC_CONVERTER_STATION -> repository.getLccConverterStations(networkId, variantNum);
+            case STATIC_VAR_COMPENSATOR -> repository.getStaticVarCompensators(networkId, variantNum);
+            case BUSBAR_SECTION -> repository.getBusbarSections(networkId, variantNum);
+            case SWITCH -> repository.getSwitches(networkId, variantNum);
+            case GROUND -> repository.getGrounds(networkId, variantNum);
+            case TWO_WINDINGS_TRANSFORMER -> repository.getTwoWindingsTransformers(networkId, variantNum);
+            case THREE_WINDINGS_TRANSFORMER -> repository.getThreeWindingsTransformers(networkId, variantNum);
+            case LINE -> repository.getLines(networkId, variantNum);
+            case HVDC_LINE -> repository.getHvdcLines(networkId, variantNum);
+            case BOUNDARY_LINE -> repository.getBoundaryLines(networkId, variantNum);
+            case TIE_LINE -> repository.getTieLines(networkId, variantNum);
+            case CONFIGURED_BUS -> repository.getConfiguredBuses(networkId, variantNum);
+            case AREA -> repository.getAreas(networkId, variantNum);
+            default -> List.of();
+        };
+    }
+
+    @GetMapping(value = "/{networkId}/{variantNum}/collections", produces = APPLICATION_JSON_VALUE)
+    @Operation(summary = "Get all the identifiable collections of a network variant in a single call")
+    @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get all the collections"))
+    public ResponseEntity<AllCollectionsBundle> getAllCollections(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+                                                                  @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum) {
+        Map<ResourceType, Future<List<Resource<IdentifiableAttributes>>>> resourceFutures = new EnumMap<>(ResourceType.class);
+        for (ResourceType resourceType : COLLECTION_RESOURCE_TYPES) {
+            resourceFutures.put(resourceType, collectionsExecutor.submit(() -> getCollection(resourceType, networkId, variantNum)));
+        }
+        Map<ResourceType, Future<Map<String, Map<Integer, Map<String, OperationalLimitsGroupAttributes>>>>> limitsFutures = new EnumMap<>(ResourceType.class);
+        for (ResourceType resourceType : SELECTED_LIMITS_RESOURCE_TYPES) {
+            limitsFutures.put(resourceType, collectionsExecutor.submit(() ->
+                repository.getAllSelectedOperationalLimitsGroupAttributesByResourceType(networkId, variantNum, resourceType)));
+        }
+        try {
+            Map<ResourceType, List<Resource<IdentifiableAttributes>>> resources = new EnumMap<>(ResourceType.class);
+            for (Map.Entry<ResourceType, Future<List<Resource<IdentifiableAttributes>>>> entry : resourceFutures.entrySet()) {
+                resources.put(entry.getKey(), entry.getValue().get());
+            }
+            Map<ResourceType, Map<String, Map<Integer, Map<String, OperationalLimitsGroupAttributes>>>> selectedLimitsGroups = new EnumMap<>(ResourceType.class);
+            for (Map.Entry<ResourceType, Future<Map<String, Map<Integer, Map<String, OperationalLimitsGroupAttributes>>>>> entry : limitsFutures.entrySet()) {
+                selectedLimitsGroups.put(entry.getKey(), entry.getValue().get());
+            }
+            return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON)
+                .body(new AllCollectionsBundle(resources, selectedLimitsGroups));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new UncheckedInterruptedException(e);
+        } catch (ExecutionException e) {
+            throw new PowsyblException("Error loading all the collections of network " + networkId + " variant " + variantNum, e.getCause());
+        }
     }
 
     // substation
