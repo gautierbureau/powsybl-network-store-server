@@ -9,12 +9,16 @@ package com.powsybl.network.store.server;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.powsybl.iidm.network.*;
 import com.powsybl.iidm.network.extensions.ActivePowerControl;
 import com.powsybl.iidm.network.extensions.ConnectablePosition;
 import com.powsybl.iidm.network.extensions.GeneratorStartup;
 import com.powsybl.network.store.model.*;
+import com.powsybl.network.store.model.svattributes.InjectionSvAttributes;
+import com.powsybl.network.store.server.dto.BulkUpdateBundle;
+import com.powsybl.network.store.server.dto.BulkUpdateEntry;
 import jakarta.servlet.ServletException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -1617,6 +1621,89 @@ class NetworkStoreControllerIT {
         createIdentifiable(bus2, "configured-buses");
 
         deleteIdentifiables(List.of("bus1", "bus2"), "configured-buses");
+    }
+
+    @Test
+    void bulkUpdateTest() throws Exception {
+        Resource<NetworkAttributes> n1 = Resource.networkBuilder()
+                .id("n1")
+                .attributes(NetworkAttributes.builder()
+                        .uuid(NETWORK_UUID)
+                        .variantId(String.valueOf(Resource.INITIAL_VARIANT_NUM))
+                        .caseDate(ZonedDateTime.parse("2015-01-01T00:00:00.000Z"))
+                        .build())
+                .build();
+        mvc.perform(post("/" + VERSION + "/networks")
+                        .contentType(APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Collections.singleton(n1))))
+                .andExpect(status().isCreated());
+
+        Resource<LoadAttributes> load1 = Resource.loadBuilder()
+                .id("load1")
+                .attributes(LoadAttributes.builder().name("load1").voltageLevelId("vl1").build())
+                .build();
+        Resource<LoadAttributes> load2 = Resource.loadBuilder()
+                .id("load2")
+                .attributes(LoadAttributes.builder().name("load2").voltageLevelId("vl1").build())
+                .build();
+        Resource<LoadAttributes> load1Updated = Resource.loadBuilder()
+                .id("load1")
+                .attributes(LoadAttributes.builder().name("load1b").voltageLevelId("vl1").build())
+                .build();
+
+        // an SV update resource, serialized exactly like the bodies of the per type /sv endpoints
+        ObjectNode load1Sv = objectMapper.createObjectNode();
+        load1Sv.put("type", "LOAD");
+        load1Sv.put("id", "load1");
+        load1Sv.put("variantNum", Resource.INITIAL_VARIANT_NUM);
+        load1Sv.put("filter", "SV");
+        load1Sv.set("attributes", objectMapper.valueToTree(InjectionSvAttributes.builder().p(100.).q(10.).build()));
+
+        BulkUpdateBundle bundle = BulkUpdateBundle.builder()
+                .entries(List.of(
+                        BulkUpdateEntry.builder().resourceType(ResourceType.LOAD).operation("CREATE")
+                                .body(objectMapper.valueToTree(List.of(load1, load2))).build(),
+                        BulkUpdateEntry.builder().resourceType(ResourceType.LOAD).operation("UPDATE")
+                                .body(objectMapper.valueToTree(List.of(load1Updated))).build(),
+                        BulkUpdateEntry.builder().resourceType(ResourceType.LOAD).operation("UPDATE").attributeFilter("SV")
+                                .body(objectMapper.createArrayNode().add(load1Sv)).build(),
+                        BulkUpdateEntry.builder().resourceType(ResourceType.LOAD).operation("REMOVE")
+                                .body(objectMapper.valueToTree(List.of("load2"))).build()))
+                .build();
+
+        mvc.perform(post("/" + VERSION + "/networks/" + NETWORK_UUID + "/" + Resource.INITIAL_VARIANT_NUM + "/bulk-update")
+                        .contentType(APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(bundle)))
+                .andExpect(status().isOk());
+
+        mvc.perform(get("/" + VERSION + "/networks/" + NETWORK_UUID + "/" + Resource.INITIAL_VARIANT_NUM + "/loads")
+                        .contentType(APPLICATION_JSON))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("data", hasSize(1)))
+                .andExpect(jsonPath("data[0].id").value("load1"))
+                .andExpect(jsonPath("data[0].attributes.name").value("load1b"))
+                .andExpect(jsonPath("data[0].attributes.p").value(100.))
+                .andExpect(jsonPath("data[0].attributes.q").value(10.));
+
+        // an SV update on a type without an SV variant is rejected
+        BulkUpdateBundle badSvBundle = BulkUpdateBundle.builder()
+                .entries(List.of(BulkUpdateEntry.builder().resourceType(ResourceType.SWITCH).operation("UPDATE").attributeFilter("SV")
+                        .body(objectMapper.createArrayNode()).build()))
+                .build();
+        mvc.perform(post("/" + VERSION + "/networks/" + NETWORK_UUID + "/" + Resource.INITIAL_VARIANT_NUM + "/bulk-update")
+                        .contentType(APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(badSvBundle)))
+                .andExpect(status().isBadRequest());
+
+        // an unknown operation is rejected
+        BulkUpdateBundle badOperationBundle = BulkUpdateBundle.builder()
+                .entries(List.of(BulkUpdateEntry.builder().resourceType(ResourceType.LOAD).operation("UPSERT")
+                        .body(objectMapper.createArrayNode()).build()))
+                .build();
+        mvc.perform(post("/" + VERSION + "/networks/" + NETWORK_UUID + "/" + Resource.INITIAL_VARIANT_NUM + "/bulk-update")
+                        .contentType(APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(badOperationBundle)))
+                .andExpect(status().isBadRequest());
     }
 
     private void createIdentifiable(Resource<? extends AbstractIdentifiableAttributes> resource, String identifiableType) throws Exception {
