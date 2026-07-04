@@ -237,8 +237,9 @@ public class NetworkStoreController {
         ResourceType.LINE,
         ResourceType.TWO_WINDINGS_TRANSFORMER);
 
-    // the per collection queries of the collections endpoint are independent: they run in parallel
-    // on this pool (each task takes a connection from the datasource pool, so keep it smaller)
+    // the per collection queries of the collections endpoint, and the per resource type groups of
+    // the bulk update endpoint, are independent: they run in parallel on this pool (each task takes
+    // a connection from the datasource pool, so keep it smaller)
     private final ExecutorService collectionsExecutor = Executors.newFixedThreadPool(8);
 
     @PreDestroy
@@ -317,10 +318,34 @@ public class NetworkStoreController {
     public ResponseEntity<Void> bulkUpdate(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                            @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                            @Parameter(description = "Bulk update bundle", required = true) @RequestBody BulkUpdateBundle bundle) {
+        // first pass: validate every entry and build, per resource type, the ordered list of
+        // repository calls to apply; nothing is applied if any entry is invalid
+        Map<ResourceType, List<Runnable>> tasksByType = new EnumMap<>(ResourceType.class);
         if (bundle.getEntries() != null) {
             for (BulkUpdateEntry entry : bundle.getEntries()) {
-                applyBulkUpdateEntry(networkId, variantNum, entry);
+                Runnable task = toBulkUpdateTask(networkId, variantNum, entry);
+                tasksByType.computeIfAbsent(entry.getResourceType(), k -> new ArrayList<>()).add(task);
             }
+        }
+        // second pass: the groups are independent (each resource type has its own tables), so they
+        // run in parallel like the per type flushes the client used to send concurrently; within a
+        // group the entries are applied in their original order
+        List<Future<?>> futures = new ArrayList<>();
+        for (List<Runnable> tasks : tasksByType.values()) {
+            futures.add(collectionsExecutor.submit(() -> tasks.forEach(Runnable::run)));
+        }
+        try {
+            for (Future<?> future : futures) {
+                future.get();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new UncheckedInterruptedException(e);
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof ResponseStatusException responseStatusException) {
+                throw responseStatusException;
+            }
+            throw new PowsyblException("Error applying bulk update to network " + networkId + " variant " + variantNum, e.getCause());
         }
         return ResponseEntity.ok().build();
     }
@@ -330,33 +355,33 @@ public class NetworkStoreController {
                 + ", operation=" + entry.getOperation() + ", attributeFilter=" + entry.getAttributeFilter());
     }
 
-    private void applyBulkUpdateEntry(UUID networkUuid, int variantNum, BulkUpdateEntry entry) {
+    private Runnable toBulkUpdateTask(UUID networkUuid, int variantNum, BulkUpdateEntry entry) {
         if (entry.getResourceType() == null || entry.getOperation() == null) {
             throw unsupportedBulkUpdateEntry(entry);
         }
-        switch (entry.getOperation()) {
-            case "CREATE" -> bulkCreate(networkUuid, entry);
+        return switch (entry.getOperation()) {
+            case "CREATE" -> bulkCreateTask(networkUuid, entry);
             case "UPDATE" -> {
                 if (entry.getAttributeFilter() == null) {
-                    bulkUpdate(networkUuid, entry);
+                    yield bulkUpdateTask(networkUuid, entry);
                 } else if ("SV".equals(entry.getAttributeFilter())) {
-                    bulkUpdateSv(networkUuid, entry);
+                    yield bulkUpdateSvTask(networkUuid, entry);
                 } else {
                     throw unsupportedBulkUpdateEntry(entry);
                 }
             }
-            case "REMOVE" -> bulkRemove(networkUuid, variantNum, entry);
+            case "REMOVE" -> bulkRemoveTask(networkUuid, variantNum, entry);
             default -> throw unsupportedBulkUpdateEntry(entry);
-        }
+        };
     }
 
-    private <T extends Attributes> void observeBulk(String name, BulkUpdateEntry entry, TypeReference<List<Resource<T>>> typeReference, Consumer<List<Resource<T>>> f) {
+    private <T extends Attributes> Runnable observeBulk(String name, BulkUpdateEntry entry, TypeReference<List<Resource<T>>> typeReference, Consumer<List<Resource<T>>> f) {
         List<Resource<T>> resources = objectMapper.convertValue(entry.getBody(), typeReference);
-        networkStoreObserver.observe(name, entry.getResourceType(), resources.size(), () -> f.accept(resources));
+        return () -> networkStoreObserver.observe(name, entry.getResourceType(), resources.size(), () -> f.accept(resources));
     }
 
-    private void bulkCreate(UUID networkUuid, BulkUpdateEntry entry) {
-        switch (entry.getResourceType()) {
+    private Runnable bulkCreateTask(UUID networkUuid, BulkUpdateEntry entry) {
+        return switch (entry.getResourceType()) {
             case SUBSTATION -> observeBulk("create.all", entry, new TypeReference<List<Resource<SubstationAttributes>>>() { }, resources -> repository.createSubstations(networkUuid, resources));
             case VOLTAGE_LEVEL -> observeBulk("create.all", entry, new TypeReference<List<Resource<VoltageLevelAttributes>>>() { }, resources -> repository.createVoltageLevels(networkUuid, resources));
             case GENERATOR -> observeBulk("create.all", entry, new TypeReference<List<Resource<GeneratorAttributes>>>() { }, resources -> repository.createGenerators(networkUuid, resources));
@@ -378,11 +403,11 @@ public class NetworkStoreController {
             case GROUND -> observeBulk("create.all", entry, new TypeReference<List<Resource<GroundAttributes>>>() { }, resources -> repository.createGrounds(networkUuid, resources));
             case AREA -> observeBulk("create.all", entry, new TypeReference<List<Resource<AreaAttributes>>>() { }, resources -> repository.createAreas(networkUuid, resources));
             default -> throw unsupportedBulkUpdateEntry(entry);
-        }
+        };
     }
 
-    private void bulkUpdate(UUID networkUuid, BulkUpdateEntry entry) {
-        switch (entry.getResourceType()) {
+    private Runnable bulkUpdateTask(UUID networkUuid, BulkUpdateEntry entry) {
+        return switch (entry.getResourceType()) {
             case NETWORK -> observeBulk("update.all", entry, new TypeReference<List<Resource<NetworkAttributes>>>() { }, resources -> repository.updateNetworks(resources));
             case SUBSTATION -> observeBulk("update.all", entry, new TypeReference<List<Resource<SubstationAttributes>>>() { }, resources -> repository.updateSubstations(networkUuid, resources));
             case VOLTAGE_LEVEL -> observeBulk("update.all", entry, new TypeReference<List<Resource<VoltageLevelAttributes>>>() { }, resources -> repository.updateVoltageLevels(networkUuid, resources));
@@ -405,11 +430,11 @@ public class NetworkStoreController {
             case GROUND -> observeBulk("update.all", entry, new TypeReference<List<Resource<GroundAttributes>>>() { }, resources -> repository.updateGrounds(networkUuid, resources));
             case AREA -> observeBulk("update.all", entry, new TypeReference<List<Resource<AreaAttributes>>>() { }, resources -> repository.updateAreas(networkUuid, resources));
             default -> throw unsupportedBulkUpdateEntry(entry);
-        }
+        };
     }
 
-    private void bulkUpdateSv(UUID networkUuid, BulkUpdateEntry entry) {
-        switch (entry.getResourceType()) {
+    private Runnable bulkUpdateSvTask(UUID networkUuid, BulkUpdateEntry entry) {
+        return switch (entry.getResourceType()) {
             case VOLTAGE_LEVEL -> observeBulk("update.all", entry, new TypeReference<List<Resource<VoltageLevelSvAttributes>>>() { }, resources -> repository.updateVoltageLevelsSv(networkUuid, resources));
             case GENERATOR -> observeBulk("update.all", entry, new TypeReference<List<Resource<InjectionSvAttributes>>>() { }, resources -> repository.updateGeneratorsSv(networkUuid, resources));
             case BATTERY -> observeBulk("update.all", entry, new TypeReference<List<Resource<InjectionSvAttributes>>>() { }, resources -> repository.updateBatteriesSv(networkUuid, resources));
@@ -423,10 +448,10 @@ public class NetworkStoreController {
             case LINE -> observeBulk("update.all", entry, new TypeReference<List<Resource<BranchSvAttributes>>>() { }, resources -> repository.updateLinesSv(networkUuid, resources));
             case BOUNDARY_LINE -> observeBulk("update.all", entry, new TypeReference<List<Resource<InjectionSvAttributes>>>() { }, resources -> repository.updateBoundaryLinesSv(networkUuid, resources));
             default -> throw unsupportedBulkUpdateEntry(entry);
-        }
+        };
     }
 
-    private void bulkRemove(UUID networkUuid, int variantNum, BulkUpdateEntry entry) {
+    private Runnable bulkRemoveTask(UUID networkUuid, int variantNum, BulkUpdateEntry entry) {
         List<String> ids = objectMapper.convertValue(entry.getBody(), new TypeReference<List<String>>() { });
         Consumer<List<String>> remover = switch (entry.getResourceType()) {
             case SUBSTATION -> idList -> repository.deleteSubstations(networkUuid, variantNum, idList);
@@ -451,7 +476,7 @@ public class NetworkStoreController {
             case AREA -> idList -> repository.deleteAreas(networkUuid, variantNum, idList);
             default -> throw unsupportedBulkUpdateEntry(entry);
         };
-        networkStoreObserver.observe("remove.all", entry.getResourceType(), ids.size(), () -> remover.accept(ids));
+        return () -> networkStoreObserver.observe("remove.all", entry.getResourceType(), ids.size(), () -> remover.accept(ids));
     }
 
     // substation

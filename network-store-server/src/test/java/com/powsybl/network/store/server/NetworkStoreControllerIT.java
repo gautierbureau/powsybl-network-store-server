@@ -1685,25 +1685,44 @@ class NetworkStoreControllerIT {
                 .andExpect(jsonPath("data[0].attributes.p").value(100.))
                 .andExpect(jsonPath("data[0].attributes.q").value(10.));
 
-        // an SV update on a type without an SV variant is rejected
+        Resource<LoadAttributes> load3 = Resource.loadBuilder()
+                .id("load3")
+                .attributes(LoadAttributes.builder().name("load3").voltageLevelId("vl1").build())
+                .build();
+
+        // an SV update on a type without an SV variant is rejected, and nothing of the bundle is
+        // applied, not even the valid entries preceding the invalid one
         BulkUpdateBundle badSvBundle = BulkUpdateBundle.builder()
-                .entries(List.of(BulkUpdateEntry.builder().resourceType(ResourceType.SWITCH).operation("UPDATE").attributeFilter("SV")
-                        .body(objectMapper.createArrayNode()).build()))
+                .entries(List.of(
+                        BulkUpdateEntry.builder().resourceType(ResourceType.LOAD).operation("CREATE")
+                                .body(objectMapper.valueToTree(List.of(load3))).build(),
+                        BulkUpdateEntry.builder().resourceType(ResourceType.SWITCH).operation("UPDATE").attributeFilter("SV")
+                                .body(objectMapper.createArrayNode()).build()))
                 .build();
         mvc.perform(post("/" + VERSION + "/networks/" + NETWORK_UUID + "/" + Resource.INITIAL_VARIANT_NUM + "/bulk-update")
                         .contentType(APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(badSvBundle)))
                 .andExpect(status().isBadRequest());
 
-        // an unknown operation is rejected
+        // an unknown operation is rejected, and the valid entry of the bundle was not applied
         BulkUpdateBundle badOperationBundle = BulkUpdateBundle.builder()
-                .entries(List.of(BulkUpdateEntry.builder().resourceType(ResourceType.LOAD).operation("UPSERT")
-                        .body(objectMapper.createArrayNode()).build()))
+                .entries(List.of(
+                        BulkUpdateEntry.builder().resourceType(ResourceType.LOAD).operation("CREATE")
+                                .body(objectMapper.valueToTree(List.of(load3))).build(),
+                        BulkUpdateEntry.builder().resourceType(ResourceType.LOAD).operation("UPSERT")
+                                .body(objectMapper.createArrayNode()).build()))
                 .build();
         mvc.perform(post("/" + VERSION + "/networks/" + NETWORK_UUID + "/" + Resource.INITIAL_VARIANT_NUM + "/bulk-update")
                         .contentType(APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(badOperationBundle)))
                 .andExpect(status().isBadRequest());
+
+        // the store was not modified by the rejected bundles: load3 was never created
+        mvc.perform(get("/" + VERSION + "/networks/" + NETWORK_UUID + "/" + Resource.INITIAL_VARIANT_NUM + "/loads")
+                        .contentType(APPLICATION_JSON))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("data", hasSize(1)))
+                .andExpect(jsonPath("data[0].id").value("load1"));
     }
 
     private void createIdentifiable(Resource<? extends AbstractIdentifiableAttributes> resource, String identifiableType) throws Exception {
