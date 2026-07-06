@@ -756,4 +756,12 @@ public final class QueryCatalog {
                 NETWORK_UUID_COLUMN + " = ? and " +
                 VARIANT_NUM_COLUMN + " = ?";
     }
+
+    public static String buildGetIdsWithInClauseQuery(String table, int numberOfValues) {
+        if (numberOfValues < 1) {
+            throw new IllegalArgumentException(MINIMAL_VALUE_REQUIREMENT_ERROR);
+        }
+        return buildGetIdsQuery(table) +
+                " and " + ID_COLUMN + " in (" + generateInPlaceholders(numberOfValues) + ")";
+    }
 }

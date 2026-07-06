@@ -137,7 +137,7 @@ public class NetworkStoreRepository {
                     () -> getTombstonedIdentifiableIds(connection, networkUuid, variantNum),
                     variant -> getIdentifiablesIdsForVariant(connection, networkUuid, variant),
                     Function.identity(),
-                    () -> getIdentifiablesIdsForVariant(connection, networkUuid, variantNum)));
+                    null));
         } catch (SQLException e) {
             throw new UncheckedSqlException(e);
         }
@@ -764,10 +764,39 @@ public class NetworkStoreRepository {
                     () -> getTombstonedIdentifiableIds(connection, networkUuid, variantNum),
                     variant -> getIdentifiablesInContainerForVariant(connection, networkUuid, variant, containerId, containerColumns, tableMapping, variantNum),
                     Resource::getId,
-                    () -> getIdentifiablesIdsForVariantFromTable(connection, networkUuid, variantNum, tableMapping.getTable()));
+                    // probe only the ids retrieved from the full variant instead of listing the whole table:
+                    // a resource updated in the partial variant shadows its full variant version even when it
+                    // no longer belongs to the container, so the probe checks existence in any container
+                    candidateIds -> getExistingIdsForVariantFromTable(connection, networkUuid, variantNum, tableMapping.getTable(), candidateIds));
         } catch (SQLException e) {
             throw new UncheckedSqlException(e);
         }
+    }
+
+    /**
+     * Retrieve, among the given ids, those that exist in the given variant of the table. Queries only
+     * the given ids instead of scanning all the ids of the table for the variant, so the cost is
+     * proportional to the number of given ids and not to the table size.
+     */
+    private static Set<String> getExistingIdsForVariantFromTable(Connection connection, UUID networkUuid, int variantNum, String tableName, Set<String> ids) {
+        Set<String> existingIds = new HashSet<>();
+        for (List<String> idsPartition : Lists.partition(new ArrayList<>(ids), BATCH_SIZE)) {
+            try (var preparedStmt = connection.prepareStatement(buildGetIdsWithInClauseQuery(tableName, idsPartition.size()))) {
+                preparedStmt.setObject(1, networkUuid);
+                preparedStmt.setInt(2, variantNum);
+                for (int i = 0; i < idsPartition.size(); i++) {
+                    preparedStmt.setString(3 + i, idsPartition.get(i));
+                }
+                try (ResultSet resultSet = preparedStmt.executeQuery()) {
+                    while (resultSet.next()) {
+                        existingIds.add(resultSet.getString(1));
+                    }
+                }
+            } catch (SQLException e) {
+                throw new UncheckedSqlException(e);
+            }
+        }
+        return existingIds;
     }
 
     private <T extends IdentifiableAttributes> List<Resource<T>> getIdentifiablesInContainerForVariant(Connection connection, UUID networkUuid, int variantNum, String containerId,
