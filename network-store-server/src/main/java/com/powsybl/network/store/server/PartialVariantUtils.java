@@ -16,6 +16,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 /**
@@ -151,13 +152,24 @@ public final class PartialVariantUtils {
                 !fullVariant.contains(owner.getVariantNum())).collect(Collectors.toSet());
     }
 
+    /**
+     * @param fetchExistingIdsInVariantAmong given the ids of the resources retrieved from the full variant,
+     *                                       returns those that exist (in any container) in the partial variant,
+     *                                       so that their full variant version is shadowed. It only needs to
+     *                                       check the given ids, not to list the whole table. When null, the
+     *                                       ids of the resources retrieved in the partial variant are used;
+     *                                       this is only correct when the fetch is not filtered (whole
+     *                                       collection reads), as a resource updated in the partial variant may
+     *                                       no longer match the filter (e.g. moved to another container) while
+     *                                       still having to shadow its full variant version.
+     */
     public static <T> List<T> getIdentifiables(
             int variantNum,
             int fullVariantNum,
             Supplier<Set<String>> fetchTombstonedIdentifiableIds,
             IntFunction<List<T>> fetchIdentifiablesInVariant,
             Function<T, String> idExtractor,
-            Supplier<List<String>> fetchIdentifiblesIdsInVariant) {
+            UnaryOperator<Set<String>> fetchExistingIdsInVariantAmong) {
         if (NetworkAttributes.isFullVariant(fullVariantNum)) {
             // If the variant is full, retrieve identifiables directly
             return fetchIdentifiablesInVariant.apply(variantNum);
@@ -169,9 +181,11 @@ public final class PartialVariantUtils {
         // Retrieve identifiables in partial variant
         List<T> partialVariantIdentifiables = fetchIdentifiablesInVariant.apply(variantNum);
 
-        // Retrieve ids in partial variant
-        Set<String> partialVariantIds = fetchIdentifiblesIdsInVariant != null
-                ? new HashSet<>(fetchIdentifiblesIdsInVariant.get())
+        // Retrieve the ids of the full variant resources that are overridden in the partial variant
+        Set<String> partialVariantIds = fetchExistingIdsInVariantAmong != null
+                ? fetchExistingIdsInVariantAmong.apply(identifiables.stream()
+                        .map(idExtractor)
+                        .collect(Collectors.toSet()))
                 : partialVariantIdentifiables.stream()
                 .map(idExtractor)
                 .collect(Collectors.toSet());
