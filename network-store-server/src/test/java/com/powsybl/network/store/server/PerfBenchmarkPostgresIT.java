@@ -101,6 +101,11 @@ class PerfBenchmarkPostgresIT {
         bench("getLoads[partial]", () -> repository.getLoads(NETWORK_UUID, PARTIAL_VARIANT).size());
         bench("getGenerators[partial]", () -> repository.getGenerators(NETWORK_UUID, PARTIAL_VARIANT).size());
 
+        // per-voltage-level reads: small voltage level (~100 loads) in a 100k-load table.
+        // On the partial variant this is the bus-view preload shape after a load flow save.
+        bench("getVLLoads[full]", () -> repository.getVoltageLevelLoads(NETWORK_UUID, VARIANT, "vl-small").size());
+        bench("getVLLoads[partial]", () -> repository.getVoltageLevelLoads(NETWORK_UUID, PARTIAL_VARIANT, "vl-small").size());
+
         // single identifiable get (all-tables join + completion queries)
         bench("getIdentifiable(load)", () -> repository.getIdentifiable(NETWORK_UUID, VARIANT, "load42").isPresent() ? 1 : 0);
         bench("getIdentifiable(gen)", () -> repository.getIdentifiable(NETWORK_UUID, VARIANT, "gen42").isPresent() ? 1 : 0);
@@ -191,6 +196,17 @@ class PerfBenchmarkPostgresIT {
         repository.updateLoads(NETWORK_UUID, updatedLoads);
         repository.updateGenerators(NETWORK_UUID, updatedGens);
 
+        // a full SV flush on the partial variant, as a load flow save does: after it the partial
+        // variant contains a row for every load (chunked below the PostgreSQL parameter limit)
+        for (int start = 0; start < NB_LOADS; start += 50000) {
+            List<Resource<InjectionSvAttributes>> loadsSvChunk = new ArrayList<>();
+            for (int i = start; i < Math.min(start + 50000, NB_LOADS); i++) {
+                loadsSvChunk.add(Resource.create(ResourceType.LOAD, "load" + i, PARTIAL_VARIANT,
+                        InjectionSvAttributes.builder().p(2.0).q(1.0).build()));
+            }
+            repository.updateLoadsSv(NETWORK_UUID, loadsSvChunk);
+        }
+
         // settle planner statistics so measurements reflect steady state, not the
         // transient post-bulk-import state where the planner has no statistics yet
         try (var connection = dataSource.getConnection(); var statement = connection.createStatement()) {
@@ -204,7 +220,7 @@ class PerfBenchmarkPostgresIT {
         return Resource.loadBuilder()
                 .id("load" + i)
                 .variantNum(VARIANT)
-                .attributes(LoadAttributes.builder().voltageLevelId("vl1").p(p).build())
+                .attributes(LoadAttributes.builder().voltageLevelId(i % 1000 == 0 ? "vl-small" : "vl1").p(p).build())
                 .build();
     }
 
