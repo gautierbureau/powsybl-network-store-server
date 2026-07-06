@@ -804,17 +804,46 @@ public class NetworkStoreRepository {
 
     private <T extends Attributes> Map<Boolean, List<Resource<T>>> partitionResourcesByExistenceInVariant(Connection connection, UUID networkUuid, List<Resource<T>> resources, String tableName) {
         Map<Integer, Set<String>> existingIdsByVariant = resources.stream()
-                .map(Resource::getVariantNum)
-                .distinct()
+                .collect(Collectors.groupingBy(
+                        Resource::getVariantNum,
+                        Collectors.mapping(Resource::getId, Collectors.toSet())
+                ))
+                .entrySet().stream()
                 .collect(Collectors.toMap(
-                        variantNum -> variantNum,
-                        variantNum -> new HashSet<>(getIdentifiablesIdsForVariantFromTable(connection, networkUuid, variantNum, tableName))
+                        Map.Entry::getKey,
+                        entry -> getExistingIdsForVariantFromTable(connection, networkUuid, entry.getKey(), tableName, entry.getValue())
                 ));
 
         return resources.stream()
                 .collect(Collectors.partitioningBy(
                         resource -> existingIdsByVariant.get(resource.getVariantNum()).contains(resource.getId())
                 ));
+    }
+
+    /**
+     * Retrieve, among the given ids, those that exist in the given variant of the table. Queries only
+     * the given ids instead of scanning all the ids of the table for the variant, so the cost is
+     * proportional to the update batch and not to the table size.
+     */
+    private static Set<String> getExistingIdsForVariantFromTable(Connection connection, UUID networkUuid, int variantNum, String tableName, Set<String> ids) {
+        Set<String> existingIds = new HashSet<>();
+        for (List<String> idsPartition : Lists.partition(new ArrayList<>(ids), BATCH_SIZE)) {
+            try (var preparedStmt = connection.prepareStatement(buildGetIdsWithInClauseQuery(tableName, idsPartition.size()))) {
+                preparedStmt.setObject(1, networkUuid);
+                preparedStmt.setInt(2, variantNum);
+                for (int i = 0; i < idsPartition.size(); i++) {
+                    preparedStmt.setString(3 + i, idsPartition.get(i));
+                }
+                try (ResultSet resultSet = preparedStmt.executeQuery()) {
+                    while (resultSet.next()) {
+                        existingIds.add(resultSet.getString(1));
+                    }
+                }
+            } catch (SQLException e) {
+                throw new UncheckedSqlException(e);
+            }
+        }
+        return existingIds;
     }
 
     private <T extends IdentifiableAttributes & Contained> void processUpdateIdentifiables(Connection connection, UUID networkUuid, List<Resource<T>> resources,
