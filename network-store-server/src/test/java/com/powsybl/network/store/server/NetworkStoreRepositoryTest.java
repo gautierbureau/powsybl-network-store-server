@@ -786,6 +786,38 @@ class NetworkStoreRepositoryTest {
     }
 
     @Test
+    void createUpdateAndDeleteMoreIdentifiablesThanBatchSize() {
+        NetworkAttributes networkAttributes = new NetworkAttributes();
+        networkAttributes.setUuid(NETWORK_UUID);
+        networkStoreRepository.createNetworks(List.of(Resource.networkBuilder().attributes(networkAttributes).id("testId1").build()));
+
+        int count = Utils.BATCH_SIZE + 1;
+        List<Resource<LoadAttributes>> loads = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            loads.add(Resource.loadBuilder()
+                    .id("load" + i)
+                    .attributes(LoadAttributes.builder()
+                            .voltageLevelId("vl1")
+                            .build())
+                    .build());
+        }
+        networkStoreRepository.createLoads(NETWORK_UUID, loads);
+        assertEquals(count, networkStoreRepository.getLoads(NETWORK_UUID, Resource.INITIAL_VARIANT_NUM).size());
+
+        // update all the loads: exercises the batched existence check partitioning updates from inserts
+        loads.forEach(load -> load.getAttributes().setP(1.5));
+        networkStoreRepository.updateLoads(NETWORK_UUID, loads);
+        List<Resource<LoadAttributes>> updatedLoads = networkStoreRepository.getLoads(NETWORK_UUID, Resource.INITIAL_VARIANT_NUM);
+        assertEquals(count, updatedLoads.size());
+        assertTrue(updatedLoads.stream().allMatch(load -> load.getAttributes().getP() == 1.5));
+
+        // delete all the loads in one call, with more ids than the batch size
+        List<String> loadIds = loads.stream().map(Resource::getId).toList();
+        networkStoreRepository.deleteLoads(NETWORK_UUID, Resource.INITIAL_VARIANT_NUM, loadIds);
+        assertTrue(networkStoreRepository.getLoads(NETWORK_UUID, Resource.INITIAL_VARIANT_NUM).isEmpty());
+    }
+
+    @Test
     void testRegulatingPointForGenerator() {
         NetworkAttributes networkAttributes = new NetworkAttributes();
         networkAttributes.setUuid(NETWORK_UUID);

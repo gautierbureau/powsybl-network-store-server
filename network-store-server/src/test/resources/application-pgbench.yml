@@ -1,0 +1,14 @@
+powsybl-ws:
+  database:
+    vendor: postgresql
+    host: localhost
+    port: 5432
+    login: postgres
+    password: postgres
+    name: iidm
+    customQuery: ~
+    query: ~
+
+spring:
+  liquibase:
+    enabled: true

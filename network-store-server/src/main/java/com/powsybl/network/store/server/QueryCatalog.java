@@ -756,4 +756,19 @@ public final class QueryCatalog {
                 NETWORK_UUID_COLUMN + " = ? and " +
                 VARIANT_NUM_COLUMN + " = ?";
     }
+
+    public static String buildGetIdsWithInClauseQuery(String table, int numberOfValues) {
+        if (numberOfValues < 1) {
+            throw new IllegalArgumentException(MINIMAL_VALUE_REQUIREMENT_ERROR);
+        }
+        return buildGetIdsQuery(table) +
+                " and " + ID_COLUMN + " in (" + generateInPlaceholders(numberOfValues) + ")";
+    }
+
+    public static String buildGetFullVariantNumQuery() {
+        return "select " + FULL_VARIANT_NUM_COLUMN +
+                " from " + NETWORK_TABLE +
+                " where " + UUID_COLUMN + " = ?" +
+                " and " + VARIANT_NUM_COLUMN + " = ?";
+    }
 }
