@@ -13,7 +13,6 @@ import com.powsybl.network.store.model.IdentifiableAttributes;
 import com.powsybl.network.store.model.NetworkAttributes;
 import com.powsybl.network.store.model.Resource;
 import com.powsybl.network.store.server.exceptions.UncheckedSqlException;
-import org.apache.commons.lang3.mutable.MutableInt;
 
 import javax.sql.DataSource;
 import java.io.IOException;
@@ -69,24 +68,38 @@ public final class Utils {
     static void bindAttributes(ResultSet resultSet, int columnIndex, ColumnMapping columnMapping, IdentifiableAttributes attributes, ObjectMapper mapper) {
         try {
             Object value = null;
-            if (columnMapping.getClassR() == null || isCustomTypeJsonified(columnMapping.getClassR())) {
+            Class<?> classR = columnMapping.getClassR();
+            if (classR == null || isCustomTypeJsonified(classR)) {
                 String str = resultSet.getString(columnIndex);
                 if (str != null) {
                     if (columnMapping.getClassMapKey() != null && columnMapping.getClassMapValue() != null) {
-                        value = mapper.readValue(str, mapper.getTypeFactory().constructMapType(Map.class, columnMapping.getClassMapKey(), columnMapping.getClassMapValue()));
+                        value = mapper.readValue(str, columnMapping.getMapType(mapper.getTypeFactory()));
                     } else {
-                        if (columnMapping.getClassR() == null) {
+                        if (classR == null) {
                             throw new PowsyblException("Invalid mapping config");
                         }
-                        if (columnMapping.getClassR() == Instant.class) {
+                        if (classR == Instant.class) {
                             value = resultSet.getTimestamp(columnIndex).toInstant();
                         } else {
-                            value = mapper.readValue(str, columnMapping.getClassR());
+                            value = mapper.readValue(str, classR);
                         }
                     }
                 }
+            } else if (classR == String.class) {
+                value = resultSet.getString(columnIndex);
+            } else if (classR == Double.class) {
+                // type-specialized accessors avoid the per-call dispatch of getObject(int, Class),
+                // which is measurable on large collection reads
+                double doubleValue = resultSet.getDouble(columnIndex);
+                value = resultSet.wasNull() ? null : doubleValue;
+            } else if (classR == Integer.class) {
+                int intValue = resultSet.getInt(columnIndex);
+                value = resultSet.wasNull() ? null : intValue;
+            } else if (classR == Boolean.class) {
+                boolean booleanValue = resultSet.getBoolean(columnIndex);
+                value = resultSet.wasNull() ? null : booleanValue;
             } else {
-                value = resultSet.getObject(columnIndex, columnMapping.getClassR());
+                value = resultSet.getObject(columnIndex, classR);
             }
             if (value != null) {
                 columnMapping.set(attributes, value);
@@ -122,11 +135,10 @@ public final class Utils {
             try (ResultSet resultSet = preparedStmt.executeQuery()) {
                 if (resultSet.next()) {
                     NetworkAttributes attributes = new NetworkAttributes();
-                    MutableInt columnIndex = new MutableInt(2);
-                    networkMapping.getColumnsMapping().forEach((columnName, columnMapping) -> {
-                        bindAttributes(resultSet, columnIndex.getValue(), columnMapping, attributes, mapper);
-                        columnIndex.increment();
-                    });
+                    ColumnMapping[] columnMappings = networkMapping.getColumnsMapping().values().toArray(new ColumnMapping[0]);
+                    for (int i = 0; i < columnMappings.length; i++) {
+                        bindAttributes(resultSet, i + 2, columnMappings[i], attributes, mapper);
+                    }
                     String networkId = resultSet.getString(1); // id is first
                     Resource<NetworkAttributes> resource = Resource.networkBuilder()
                         .id(networkId)

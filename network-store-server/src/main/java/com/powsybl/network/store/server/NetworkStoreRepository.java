@@ -29,7 +29,6 @@ import com.powsybl.network.store.server.json.TapChangerStepSqlData;
 import com.powsybl.ws.commons.LogUtils;
 import lombok.Getter;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.lang3.mutable.MutableInt;
 import org.apache.commons.lang3.tuple.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -529,12 +528,36 @@ public class NetworkStoreRepository {
         cloneNetworkVariant(networkUuid, sourceVariantNum, targetVariantNum, targetVariantId);
     }
 
+    /**
+     * Minimum number of created resources from which the table statistics are refreshed after the insertion.
+     * After a bulk creation (typically a network import), the PostgreSQL planner has no up-to-date statistics
+     * on the table until autoanalyze catches up; in that window, the per-row update statements of a first
+     * flush can be planned as sequential scans (measured ~200x slower on a 100k row table).
+     */
+    private static final int ANALYZE_ROW_COUNT_THRESHOLD = 1000;
+
     public <T extends IdentifiableAttributes> void createIdentifiables(UUID networkUuid, List<Resource<T>> resources,
                                                                        TableMapping tableMapping) {
         try (var connection = dataSource.getConnection()) {
             processInsertIdentifiables(networkUuid, resources, tableMapping, connection);
+            if (resources.size() >= ANALYZE_ROW_COUNT_THRESHOLD) {
+                analyzeTableBestEffort(connection, tableMapping.getTable());
+            }
         } catch (SQLException e) {
             throw new UncheckedSqlException(e);
+        }
+    }
+
+    private static void analyzeTableBestEffort(Connection connection, String tableName) {
+        try {
+            if ("PostgreSQL".equalsIgnoreCase(connection.getMetaData().getDatabaseProductName())) {
+                try (var statement = connection.createStatement()) {
+                    statement.execute("ANALYZE " + tableName);
+                }
+            }
+        } catch (SQLException e) {
+            // never fail the creation for a statistics refresh
+            LOGGER.warn("Could not analyze table {} after bulk insert", tableName, e);
         }
     }
 
@@ -586,11 +609,10 @@ public class NetworkStoreRepository {
             try (ResultSet resultSet = preparedStmt.executeQuery()) {
                 if (resultSet.next()) {
                     T attributes = (T) tableMapping.getAttributesSupplier().get();
-                    MutableInt columnIndex = new MutableInt(1);
-                    tableMapping.getColumnsMapping().forEach((columnName, columnMapping) -> {
-                        bindAttributes(resultSet, columnIndex.getValue(), columnMapping, attributes, mapper);
-                        columnIndex.increment();
-                    });
+                    ColumnMapping[] columnMappings = tableMapping.getColumnsMapping().values().toArray(new ColumnMapping[0]);
+                    for (int i = 0; i < columnMappings.length; i++) {
+                        bindAttributes(resultSet, i + 1, columnMappings[i], attributes, mapper);
+                    }
                     Resource.Builder<T> resourceBuilder = (Resource.Builder<T>) tableMapping.getResourceBuilderSupplier().get();
                     Resource<T> resource = resourceBuilder
                             .id(equipmentId)
@@ -696,15 +718,14 @@ public class NetworkStoreRepository {
     private <T extends IdentifiableAttributes> List<Resource<T>> getIdentifiablesInternal(int variantNum, PreparedStatement preparedStmt, TableMapping tableMapping) throws SQLException {
         try (ResultSet resultSet = preparedStmt.executeQuery()) {
             List<Resource<T>> resources = new ArrayList<>();
+            ColumnMapping[] columnMappings = tableMapping.getColumnsMapping().values().toArray(new ColumnMapping[0]);
             while (resultSet.next()) {
                 // first is ID
                 String id = resultSet.getString(1);
                 T attributes = (T) tableMapping.getAttributesSupplier().get();
-                MutableInt columnIndex = new MutableInt(2);
-                tableMapping.getColumnsMapping().forEach((columnName, columnMapping) -> {
-                    bindAttributes(resultSet, columnIndex.getValue(), columnMapping, attributes, mapper);
-                    columnIndex.increment();
-                });
+                for (int i = 0; i < columnMappings.length; i++) {
+                    bindAttributes(resultSet, i + 2, columnMappings[i], attributes, mapper);
+                }
                 Resource.Builder<T> resourceBuilder = (Resource.Builder<T>) tableMapping.getResourceBuilderSupplier().get();
                 resources.add(resourceBuilder
                         .id(id)

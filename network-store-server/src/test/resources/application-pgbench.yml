@@ -6,7 +6,8 @@ powsybl-ws:
     login: postgres
     password: postgres
     name: iidm
-    customQuery: ~
+    # match the production JDBC options (see main config/application.yaml)
+    customQuery: '?reWriteBatchedInserts=true'
     query: ~
 
 spring:

@@ -6,8 +6,11 @@
  */
 package com.powsybl.network.store.server;
 
+import com.fasterxml.jackson.databind.type.MapType;
+import com.fasterxml.jackson.databind.type.TypeFactory;
 import lombok.NonNull;
 
+import java.util.Map;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 
@@ -21,6 +24,7 @@ public class ColumnMapping<T, R, U, K, O> {
     private BiConsumer<T, U> setter;
     private Class<K> classMapKey;
     private Class<O> classMapValue;
+    private MapType mapType;
 
     ColumnMapping(@NonNull Class<R> classR, @NonNull Function<T, R> getter, @NonNull BiConsumer<T, U> setter) {
         this(classR, getter, setter, null, null);
@@ -52,5 +56,16 @@ public class ColumnMapping<T, R, U, K, O> {
 
     Class<O> getClassMapValue() {
         return classMapValue;
+    }
+
+    /**
+     * Jackson map type for map columns, built once and cached: constructing it for each row of a
+     * result set is measurably expensive on large collections.
+     */
+    MapType getMapType(TypeFactory typeFactory) {
+        if (mapType == null) {
+            mapType = typeFactory.constructMapType(Map.class, classMapKey, classMapValue);
+        }
+        return mapType;
     }
 }

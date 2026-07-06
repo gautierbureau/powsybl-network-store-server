@@ -7,6 +7,7 @@
 package com.powsybl.network.store.server;
 
 import com.powsybl.network.store.model.*;
+import com.powsybl.network.store.model.svattributes.InjectionSvAttributes;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -34,10 +35,11 @@ class PerfBenchmarkPostgresIT {
 
     private static final UUID NETWORK_UUID = UUID.fromString("1a2b3c4d-0000-0000-0000-000000000001");
     private static final int VARIANT = Resource.INITIAL_VARIANT_NUM;
+    private static final int PARTIAL_VARIANT = 1;
 
     // network sizing
     private static final int NB_LOADS = 100000;
-    private static final int NB_GENERATORS = 5000;
+    private static final int NB_GENERATORS = 10000;
     private static final int NB_LINES = 5000;
     private static final int NB_SWITCHES = 10000;
 
@@ -48,6 +50,8 @@ class PerfBenchmarkPostgresIT {
 
     @Autowired
     private NetworkStoreRepository repository;
+    @Autowired
+    private javax.sql.DataSource dataSource;
 
     @AfterEach
     void tearDown() {
@@ -58,47 +62,80 @@ class PerfBenchmarkPostgresIT {
     void benchmark() {
         seed();
 
-        // A) update a small batch on a large table (partitionResourcesByExistenceInVariant path)
-        List<Resource<LoadAttributes>> smallBatch = new ArrayList<>();
+        // small update batches
+        List<Resource<LoadAttributes>> loadBatch = new ArrayList<>();
+        List<Resource<InjectionSvAttributes>> loadSvBatch = new ArrayList<>();
+        List<Resource<GeneratorAttributes>> genBatch = new ArrayList<>();
+        List<Resource<InjectionSvAttributes>> genSvBatch = new ArrayList<>();
         for (int i = 0; i < SMALL_UPDATE_BATCH; i++) {
-            smallBatch.add(buildLoad(i, 3.14 + i));
+            loadBatch.add(buildLoad(i, 3.14 + i));
+            loadSvBatch.add(Resource.create(ResourceType.LOAD, "load" + i, VARIANT,
+                    InjectionSvAttributes.builder().p(5.5 + i).q(6.6 + i).build()));
+            genBatch.add(buildGenerator(i));
+            genSvBatch.add(Resource.create(ResourceType.GENERATOR, "gen" + i, VARIANT,
+                    InjectionSvAttributes.builder().p(7.7 + i).q(8.8 + i).build()));
         }
-        long updateNs = bench("updateLoads(50 of " + NB_LOADS + ")", () -> {
-            repository.updateLoads(NETWORK_UUID, smallBatch);
+
+        bench("updateLoads(50)", () -> {
+            repository.updateLoads(NETWORK_UUID, loadBatch);
+            return 0L;
+        });
+        bench("updateLoadsSv(50)", () -> {
+            repository.updateLoadsSv(NETWORK_UUID, loadSvBatch);
+            return 0L;
+        });
+        bench("updateGenerators(50)", () -> {
+            repository.updateGenerators(NETWORK_UUID, genBatch);
+            return 0L;
+        });
+        bench("updateGeneratorsSv(50)", () -> {
+            repository.updateGeneratorsSv(NETWORK_UUID, genSvBatch);
             return 0L;
         });
 
-        // B) list all identifiable ids (UNION ALL path)
-        long idsNs = bench("getIdentifiablesIds", () -> {
-            int size = repository.getIdentifiablesIds(NETWORK_UUID, VARIANT).size();
-            return (long) size;
-        });
+        // full-variant collection reads
+        bench("getLoads[full]", () -> repository.getLoads(NETWORK_UUID, VARIANT).size());
+        bench("getGenerators[full]", () -> repository.getGenerators(NETWORK_UUID, VARIANT).size());
 
-        // C) full collection read (slim fullVariantNum path, several network row reads)
-        long gensNs = bench("getGenerators", () -> {
-            int size = repository.getGenerators(NETWORK_UUID, VARIANT).size();
-            return (long) size;
-        });
+        // partial-variant collection reads (variant 1 clones variant 0 with 100 updated loads/generators)
+        bench("getLoads[partial]", () -> repository.getLoads(NETWORK_UUID, PARTIAL_VARIANT).size());
+        bench("getGenerators[partial]", () -> repository.getGenerators(NETWORK_UUID, PARTIAL_VARIANT).size());
 
-        System.out.println("=== PERF RESULTS (median ms over " + ITER + " iters) ===");
-        System.out.printf("updateLoads(%d of %d): %.2f ms%n", SMALL_UPDATE_BATCH, NB_LOADS, updateNs / 1e6);
-        System.out.printf("getIdentifiablesIds     : %.2f ms%n", idsNs / 1e6);
-        System.out.printf("getGenerators           : %.2f ms%n", gensNs / 1e6);
+        // single identifiable get (all-tables join + completion queries)
+        bench("getIdentifiable(load)", () -> repository.getIdentifiable(NETWORK_UUID, VARIANT, "load42").isPresent() ? 1 : 0);
+        bench("getIdentifiable(gen)", () -> repository.getIdentifiable(NETWORK_UUID, VARIANT, "gen42").isPresent() ? 1 : 0);
+        bench("getGenerator(gen)", () -> repository.getGenerator(NETWORK_UUID, VARIANT, "gen42").isPresent() ? 1 : 0);
+
+        // variant clone full -> partial (clone-per-contingency pattern)
+        bench("cloneVariant(full->partial)", () -> {
+            repository.cloneNetworkVariant(NETWORK_UUID, VARIANT, 10, "bench-clone");
+            return 0L;
+        }, () -> repository.deleteNetwork(NETWORK_UUID, 10));
     }
 
     private long bench(String name, LongSupplier op) {
+        return bench(name, op, null);
+    }
+
+    private long bench(String name, LongSupplier op, Runnable cleanup) {
         for (int i = 0; i < WARMUP; i++) {
             op.getAsLong();
+            if (cleanup != null) {
+                cleanup.run();
+            }
         }
         long[] samples = new long[ITER];
         for (int i = 0; i < ITER; i++) {
             long t0 = System.nanoTime();
             op.getAsLong();
             samples[i] = System.nanoTime() - t0;
+            if (cleanup != null) {
+                cleanup.run();
+            }
         }
         java.util.Arrays.sort(samples);
         long median = samples[ITER / 2];
-        System.out.printf("  %-28s median=%.2fms min=%.2fms max=%.2fms%n",
+        System.out.printf("BENCH %-28s median=%.2fms min=%.2fms max=%.2fms%n",
                 name, median / 1e6, samples[0] / 1e6, samples[ITER - 1] / 1e6);
         return median;
     }
@@ -115,11 +152,7 @@ class PerfBenchmarkPostgresIT {
 
         List<Resource<GeneratorAttributes>> gens = new ArrayList<>();
         for (int i = 0; i < NB_GENERATORS; i++) {
-            gens.add(Resource.generatorBuilder()
-                    .id("gen" + i)
-                    .variantNum(VARIANT)
-                    .attributes(GeneratorAttributes.builder().voltageLevelId("vl1").build())
-                    .build());
+            gens.add(buildGenerator(i));
         }
         repository.createGenerators(NETWORK_UUID, gens);
 
@@ -142,6 +175,29 @@ class PerfBenchmarkPostgresIT {
                     .build());
         }
         repository.createSwitches(NETWORK_UUID, switches);
+
+        // partial variant with 100 updated loads and generators
+        repository.cloneNetworkVariant(NETWORK_UUID, VARIANT, PARTIAL_VARIANT, "v1");
+        List<Resource<LoadAttributes>> updatedLoads = new ArrayList<>();
+        List<Resource<GeneratorAttributes>> updatedGens = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            Resource<LoadAttributes> l = buildLoad(i, 2.0);
+            l.setVariantNum(PARTIAL_VARIANT);
+            updatedLoads.add(l);
+            Resource<GeneratorAttributes> g = buildGenerator(i);
+            g.setVariantNum(PARTIAL_VARIANT);
+            updatedGens.add(g);
+        }
+        repository.updateLoads(NETWORK_UUID, updatedLoads);
+        repository.updateGenerators(NETWORK_UUID, updatedGens);
+
+        // settle planner statistics so measurements reflect steady state, not the
+        // transient post-bulk-import state where the planner has no statistics yet
+        try (var connection = dataSource.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("ANALYZE");
+        } catch (java.sql.SQLException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static Resource<LoadAttributes> buildLoad(int i, double p) {
@@ -149,6 +205,26 @@ class PerfBenchmarkPostgresIT {
                 .id("load" + i)
                 .variantNum(VARIANT)
                 .attributes(LoadAttributes.builder().voltageLevelId("vl1").p(p).build())
+                .build();
+    }
+
+    private static Resource<GeneratorAttributes> buildGenerator(int i) {
+        // realistic generator: min/max reactive limits and a regulating point
+        return Resource.generatorBuilder()
+                .id("gen" + i)
+                .variantNum(VARIANT)
+                .attributes(GeneratorAttributes.builder()
+                        .voltageLevelId("vl1")
+                        .name("gen" + i)
+                        .targetP(100.0)
+                        .reactiveLimits(MinMaxReactiveLimitsAttributes.builder().minQ(-50).maxQ(50).build())
+                        .regulatingPoint(RegulatingPointAttributes.builder()
+                                .regulatingEquipmentId("gen" + i)
+                                .regulatedResourceType(ResourceType.GENERATOR)
+                                .localTerminal(TerminalRefAttributes.builder().connectableId("gen" + i).build())
+                                .regulatingTerminal(TerminalRefAttributes.builder().connectableId("gen" + i).build())
+                                .build())
+                        .build())
                 .build();
     }
 }
