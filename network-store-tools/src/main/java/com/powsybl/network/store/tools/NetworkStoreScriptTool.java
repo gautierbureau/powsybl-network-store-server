@@ -116,13 +116,18 @@ public class NetworkStoreScriptTool implements Tool {
         UUID networkUuid = toolOptions.getValue(NETWORK_UUID).map(UUID::fromString).orElseThrow(() -> new IllegalArgumentException("Network UUID is missing"));
         Path scriptFile = toolOptions.getPath(SCRIPT_FILE).orElseThrow(() -> new IllegalArgumentException("Script file is missing"));
 
+        if (!scriptFile.toString().endsWith(".groovy")) {
+            throw new IllegalArgumentException("Script file must be a Groovy script (.groovy): " + scriptFile);
+        }
+
         try (NetworkStoreService service = networkStoreServiceSupplier.get()) {
             Network network = service.getNetwork(networkUuid);
-            if (scriptFile.toString().endsWith(".groovy")) {
-                context.getOutputStream().println("Applying '" + scriptFile + "' on " + networkUuid + "...");
+            context.getOutputStream().println("Applying '" + scriptFile + "' on " + networkUuid + "...");
 
-                runGroovyScript(network, scriptFile, context.getOutputStream());
-            }
+            runGroovyScript(network, scriptFile, context.getOutputStream());
+
+            // persist the modifications the script made to the network, otherwise they are lost
+            service.flush(network);
         }
     }
 }

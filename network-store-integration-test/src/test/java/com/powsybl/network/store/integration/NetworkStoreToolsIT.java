@@ -105,6 +105,14 @@ class NetworkStoreToolsIT extends AbstractNetworkStoreToolsIT {
         assertCommandSuccessful(new String[] {"network-store-script", "--network-uuid", networkUuid.toString(), "--script-file", "/work/test.groovy"},
             "Applying '/work/test.groovy' on " + networkUuid + "..." + System.lineSeparator() + "id: sim1");
 
+        // apply a mutating groovy script and check the modification is persisted
+        Files.copy(getClass().getResourceAsStream("/test-mutate.groovy"), fileSystem.getPath("/work/test-mutate.groovy"));
+        assertCommandSuccessful(new String[] {"network-store-script", "--network-uuid", networkUuid.toString(), "--script-file", "/work/test-mutate.groovy"},
+            "Applying '/work/test-mutate.groovy' on " + networkUuid + "..." + System.lineSeparator() + "applied on: sim1");
+        try (NetworkStoreService networkStoreService = new NetworkStoreService(getBaseUrl())) {
+            assertEquals("yes", networkStoreService.getNetwork(networkUuid).getProperty("scriptApplied"));
+        }
+
         // delete network
         assertCommandSuccessful(new String[] {"network-store-delete", "--network-uuid", networkUuid.toString()},
             "Deleting " + networkUuid + "..." + System.lineSeparator());
