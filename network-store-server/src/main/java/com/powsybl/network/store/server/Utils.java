@@ -69,24 +69,38 @@ public final class Utils {
     static void bindAttributes(ResultSet resultSet, int columnIndex, ColumnMapping columnMapping, IdentifiableAttributes attributes, ObjectMapper mapper) {
         try {
             Object value = null;
-            if (columnMapping.getClassR() == null || isCustomTypeJsonified(columnMapping.getClassR())) {
+            Class<?> classR = columnMapping.getClassR();
+            if (classR == null || isCustomTypeJsonified(classR)) {
                 String str = resultSet.getString(columnIndex);
                 if (str != null) {
                     if (columnMapping.getClassMapKey() != null && columnMapping.getClassMapValue() != null) {
-                        value = mapper.readValue(str, mapper.getTypeFactory().constructMapType(Map.class, columnMapping.getClassMapKey(), columnMapping.getClassMapValue()));
+                        value = mapper.readValue(str, columnMapping.getMapType(mapper.getTypeFactory()));
                     } else {
-                        if (columnMapping.getClassR() == null) {
+                        if (classR == null) {
                             throw new PowsyblException("Invalid mapping config");
                         }
-                        if (columnMapping.getClassR() == Instant.class) {
+                        if (classR == Instant.class) {
                             value = resultSet.getTimestamp(columnIndex).toInstant();
                         } else {
-                            value = mapper.readValue(str, columnMapping.getClassR());
+                            value = mapper.readValue(str, classR);
                         }
                     }
                 }
+            } else if (classR == String.class) {
+                value = resultSet.getString(columnIndex);
+            } else if (classR == Double.class) {
+                // type-specialized accessors avoid the per-call dispatch of getObject(int, Class),
+                // which is measurable on large collection reads
+                double doubleValue = resultSet.getDouble(columnIndex);
+                value = resultSet.wasNull() ? null : doubleValue;
+            } else if (classR == Integer.class) {
+                int intValue = resultSet.getInt(columnIndex);
+                value = resultSet.wasNull() ? null : intValue;
+            } else if (classR == Boolean.class) {
+                boolean booleanValue = resultSet.getBoolean(columnIndex);
+                value = resultSet.wasNull() ? null : booleanValue;
             } else {
-                value = resultSet.getObject(columnIndex, columnMapping.getClassR());
+                value = resultSet.getObject(columnIndex, classR);
             }
             if (value != null) {
                 columnMapping.set(attributes, value);

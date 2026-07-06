@@ -29,7 +29,6 @@ import com.powsybl.network.store.server.json.TapChangerStepSqlData;
 import com.powsybl.ws.commons.LogUtils;
 import lombok.Getter;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.lang3.mutable.MutableInt;
 import org.apache.commons.lang3.tuple.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -593,11 +592,10 @@ public class NetworkStoreRepository {
             try (ResultSet resultSet = preparedStmt.executeQuery()) {
                 if (resultSet.next()) {
                     T attributes = (T) tableMapping.getAttributesSupplier().get();
-                    MutableInt columnIndex = new MutableInt(1);
-                    tableMapping.getColumnsMapping().forEach((columnName, columnMapping) -> {
-                        bindAttributes(resultSet, columnIndex.getValue(), columnMapping, attributes, mapper);
-                        columnIndex.increment();
-                    });
+                    ColumnMapping[] columnMappings = tableMapping.getColumnsMapping().values().toArray(new ColumnMapping[0]);
+                    for (int i = 0; i < columnMappings.length; i++) {
+                        bindAttributes(resultSet, i + 1, columnMappings[i], attributes, mapper);
+                    }
                     Resource.Builder<T> resourceBuilder = (Resource.Builder<T>) tableMapping.getResourceBuilderSupplier().get();
                     Resource<T> resource = resourceBuilder
                             .id(equipmentId)
@@ -703,15 +701,14 @@ public class NetworkStoreRepository {
     private <T extends IdentifiableAttributes> List<Resource<T>> getIdentifiablesInternal(int variantNum, PreparedStatement preparedStmt, TableMapping tableMapping) throws SQLException {
         try (ResultSet resultSet = preparedStmt.executeQuery()) {
             List<Resource<T>> resources = new ArrayList<>();
+            ColumnMapping[] columnMappings = tableMapping.getColumnsMapping().values().toArray(new ColumnMapping[0]);
             while (resultSet.next()) {
                 // first is ID
                 String id = resultSet.getString(1);
                 T attributes = (T) tableMapping.getAttributesSupplier().get();
-                MutableInt columnIndex = new MutableInt(2);
-                tableMapping.getColumnsMapping().forEach((columnName, columnMapping) -> {
-                    bindAttributes(resultSet, columnIndex.getValue(), columnMapping, attributes, mapper);
-                    columnIndex.increment();
-                });
+                for (int i = 0; i < columnMappings.length; i++) {
+                    bindAttributes(resultSet, i + 2, columnMappings[i], attributes, mapper);
+                }
                 Resource.Builder<T> resourceBuilder = (Resource.Builder<T>) tableMapping.getResourceBuilderSupplier().get();
                 resources.add(resourceBuilder
                         .id(id)
