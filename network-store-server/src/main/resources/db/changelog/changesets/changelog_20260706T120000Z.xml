@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <changeSet id="20260706T120000Z-1" author="bureaugau">
+        <!-- The delete and select of regulating points by regulatingequipmentid cannot use the primary key
+             (networkuuid, variantnum, regulatingequipmenttype, regulatingtapchangertype, regulatingequipmentid)
+             because regulatingtapchangertype is not constrained by these queries, so they scan all the
+             regulating points of the variant. This index makes them a direct lookup. -->
+        <createIndex indexName="regulatingpoint_regulating_equipment_id_idx" tableName="regulatingpoint">
+            <column name="networkuuid"/>
+            <column name="variantnum"/>
+            <column name="regulatingequipmenttype"/>
+            <column name="regulatingequipmentid"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>
