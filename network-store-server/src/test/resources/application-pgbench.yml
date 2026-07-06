@@ -1,0 +1,15 @@
+powsybl-ws:
+  database:
+    vendor: postgresql
+    host: localhost
+    port: 5432
+    login: postgres
+    password: postgres
+    name: iidm
+    # match the production JDBC options (see main config/application.yaml)
+    customQuery: '?reWriteBatchedInserts=true'
+    query: ~
+
+spring:
+  liquibase:
+    enabled: true
