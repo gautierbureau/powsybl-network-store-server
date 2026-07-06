@@ -120,7 +120,7 @@ public final class PartialVariantUtils {
 
     public static <T extends OwnerInfo> Set<T> getExternalAttributesToTombstone(
             Map<Integer, List<String>> externalAttributesResourcesIdsByVariant,
-            IntFunction<NetworkAttributes> fetchNetworkAttributes,
+            IntFunction<Integer> fetchFullVariantNum,
             TriFunction<Integer, Integer, List<String>, Set<T>> fetchExternalAttributesOwnerInfoInVariant,
             IntFunction<Set<String>> fetchTombstonedExternalAttributesIds,
             Set<T> externalAttributesToTombstoneFromEquipments
@@ -136,8 +136,7 @@ public final class PartialVariantUtils {
         for (Map.Entry<Integer, List<String>> entry : externalAttributesResourcesIdsByVariant.entrySet()) {
             int variantNum = entry.getKey();
             List<String> resourcesIds = entry.getValue();
-            NetworkAttributes networkAttributes = fetchNetworkAttributes.apply(variantNum);
-            int fullVariantNum = networkAttributes.getFullVariantNum();
+            int fullVariantNum = fetchFullVariantNum.apply(variantNum);
             if (NetworkAttributes.isFullVariant(fullVariantNum)) {
                 fullVariant.add(variantNum);
             }
