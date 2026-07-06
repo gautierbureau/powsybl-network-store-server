@@ -342,13 +342,17 @@ public class ExtensionHandler {
     }
 
     public void deleteExtensionsFromIdentifiables(Connection connection, UUID networkUuid, int variantNum, List<String> equipmentIds) throws SQLException {
-        try (var preparedStmt = connection.prepareStatement(QueryExtensionCatalog.buildDeleteExtensionsVariantEquipmentINQuery(equipmentIds.size()))) {
-            preparedStmt.setObject(1, networkUuid);
-            preparedStmt.setInt(2, variantNum);
-            for (int i = 0; i < equipmentIds.size(); i++) {
-                preparedStmt.setString(3 + i, equipmentIds.get(i));
+        // build the in clause per partition so the placeholder count stays bounded (see BATCH_SIZE):
+        // a single in clause over an unbounded id list can exceed the database parameter limit
+        for (List<String> partition : Lists.partition(equipmentIds, BATCH_SIZE)) {
+            try (var preparedStmt = connection.prepareStatement(QueryExtensionCatalog.buildDeleteExtensionsVariantEquipmentINQuery(partition.size()))) {
+                preparedStmt.setObject(1, networkUuid);
+                preparedStmt.setInt(2, variantNum);
+                for (int i = 0; i < partition.size(); i++) {
+                    preparedStmt.setString(3 + i, partition.get(i));
+                }
+                preparedStmt.executeUpdate();
             }
-            preparedStmt.executeUpdate();
         }
     }
 
@@ -357,14 +361,14 @@ public class ExtensionHandler {
             String extensionName = entry.getKey();
             Set<String> equipmentIds = entry.getValue();
 
-            if (!equipmentIds.isEmpty()) {
-                try (var preparedStmt = connection.prepareStatement(QueryExtensionCatalog.buildDeleteExtensionsVariantByExtensionsNameAndIdentifiableIdsINQuery(equipmentIds.size()))) {
+            for (List<String> partition : Lists.partition(new ArrayList<>(equipmentIds), BATCH_SIZE)) {
+                try (var preparedStmt = connection.prepareStatement(QueryExtensionCatalog.buildDeleteExtensionsVariantByExtensionsNameAndIdentifiableIdsINQuery(partition.size()))) {
                     preparedStmt.setObject(1, networkUuid);
                     preparedStmt.setInt(2, variantNum);
                     preparedStmt.setString(3, extensionName);
 
                     int paramIndex = 4;
-                    for (String equipmentId : equipmentIds) {
+                    for (String equipmentId : partition) {
                         preparedStmt.setString(paramIndex++, equipmentId);
                     }
 

@@ -786,6 +786,68 @@ class NetworkStoreRepositoryTest {
     }
 
     @Test
+    void deleteMoreIdentifiablesThanBatchSize() {
+        NetworkAttributes networkAttributes = new NetworkAttributes();
+        networkAttributes.setUuid(NETWORK_UUID);
+        networkStoreRepository.createNetworks(List.of(Resource.networkBuilder().attributes(networkAttributes).id("testId1").build()));
+
+        // more ids than one batch, so the delete spans several partitions
+        int count = Utils.BATCH_SIZE + 1;
+        List<Resource<LoadAttributes>> loads = new ArrayList<>();
+        List<String> loadIds = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            String loadId = "load" + i;
+            loadIds.add(loadId);
+            loads.add(Resource.loadBuilder()
+                    .id(loadId)
+                    .attributes(LoadAttributes.builder().voltageLevelId("vl1").build())
+                    .build());
+        }
+        networkStoreRepository.createLoads(NETWORK_UUID, loads);
+        assertEquals(count, networkStoreRepository.getLoads(NETWORK_UUID, Resource.INITIAL_VARIANT_NUM).size());
+
+        // a single call deleting more than BATCH_SIZE ids must not throw and must remove every load
+        networkStoreRepository.deleteLoads(NETWORK_UUID, Resource.INITIAL_VARIANT_NUM, loadIds);
+        assertTrue(networkStoreRepository.getLoads(NETWORK_UUID, Resource.INITIAL_VARIANT_NUM).isEmpty());
+    }
+
+    @Test
+    void deleteGeneratorsWithSatelliteDataSpanningSeveralPartitions() {
+        NetworkAttributes networkAttributes = new NetworkAttributes();
+        networkAttributes.setUuid(NETWORK_UUID);
+        networkStoreRepository.createNetworks(List.of(Resource.networkBuilder().attributes(networkAttributes).id("testId1").build()));
+
+        // more generators than one batch, so both the identifiable delete and the deletes of their
+        // satellite rows (regulating points, reactive capability curves) span several partitions
+        int count = Utils.BATCH_SIZE + 1;
+        List<Resource<GeneratorAttributes>> generators = new ArrayList<>();
+        List<String> generatorIds = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            String generatorId = "gen" + i;
+            generatorIds.add(generatorId);
+            generators.add(Resource.generatorBuilder()
+                    .id(generatorId)
+                    .attributes(GeneratorAttributes.builder()
+                            .voltageLevelId("vl1")
+                            .reactiveLimits(MinMaxReactiveLimitsAttributes.builder().minQ(-1).maxQ(1).build())
+                            .regulatingPoint(RegulatingPointAttributes.builder()
+                                    .regulatingEquipmentId(generatorId)
+                                    .regulatedResourceType(ResourceType.GENERATOR)
+                                    .localTerminal(TerminalRefAttributes.builder().connectableId(generatorId).build())
+                                    .regulatingTerminal(TerminalRefAttributes.builder().connectableId(generatorId).build())
+                                    .build())
+                            .build())
+                    .build());
+        }
+        networkStoreRepository.createGenerators(NETWORK_UUID, generators);
+        assertEquals(count, networkStoreRepository.getGenerators(NETWORK_UUID, Resource.INITIAL_VARIANT_NUM).size());
+
+        // a single delete of more than BATCH_SIZE generators must not throw and must remove everything
+        networkStoreRepository.deleteGenerators(NETWORK_UUID, Resource.INITIAL_VARIANT_NUM, generatorIds);
+        assertTrue(networkStoreRepository.getGenerators(NETWORK_UUID, Resource.INITIAL_VARIANT_NUM).isEmpty());
+    }
+
+    @Test
     void testRegulatingPointForGenerator() {
         NetworkAttributes networkAttributes = new NetworkAttributes();
         networkAttributes.setUuid(NETWORK_UUID);
