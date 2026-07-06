@@ -106,11 +106,21 @@ public final class Utils {
         return placeholders.toString();
     }
 
-    public static NetworkAttributes getNetworkAttributes(Connection connection, UUID networkUuid, int variantNum, Mappings mappings, ObjectMapper mapper) {
-        try {
-            Resource<NetworkAttributes> networkAttributesResource = getNetwork(connection, networkUuid, variantNum, mappings, mapper)
-                    .orElseThrow(() -> new PowsyblException("Cannot retrieve source network attributes uuid : " + networkUuid + ", variantNum : " + variantNum));
-            return networkAttributesResource.getAttributes();
+    /**
+     * Retrieve only the full variant num of a network variant, avoiding to fetch and deserialize
+     * the whole network row (which contains several potentially large JSON columns) when only
+     * the full variant num is needed.
+     */
+    public static int getFullVariantNum(Connection connection, UUID networkUuid, int variantNum) {
+        try (var preparedStmt = connection.prepareStatement(QueryCatalog.buildGetFullVariantNumQuery())) {
+            preparedStmt.setObject(1, networkUuid);
+            preparedStmt.setInt(2, variantNum);
+            try (ResultSet resultSet = preparedStmt.executeQuery()) {
+                if (resultSet.next()) {
+                    return resultSet.getInt(1);
+                }
+            }
+            throw new PowsyblException("Cannot retrieve source network attributes uuid : " + networkUuid + ", variantNum : " + variantNum);
         } catch (SQLException e) {
             throw new UncheckedSqlException(e);
         }

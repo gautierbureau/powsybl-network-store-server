@@ -52,7 +52,7 @@ public class LimitsHandler {
         try (var connection = dataSource.getConnection()) {
             return PartialVariantUtils.getOperationalLimitsGroupsAttributes(
                 variantNum,
-                getNetworkAttributes(connection, networkUuid, variantNum, mappings, mapper).getFullVariantNum(),
+                getFullVariantNum(connection, networkUuid, variantNum),
                 () -> getTombstonedIdentifiableIds(connection, networkUuid, variantNum),
                 () -> getTombstonedOperationalLimitsGroups(connection, networkUuid, variantNum),
                 variant -> getOperationalLimitsGroupsForVariant(connection, networkUuid, variant,
@@ -90,7 +90,7 @@ public class LimitsHandler {
         try (var connection = dataSource.getConnection()) {
             return PartialVariantUtils.getOperationalLimitsGroupsAttributes(
                 variantNum,
-                getNetworkAttributes(connection, networkUuid, variantNum, mappings, mapper).getFullVariantNum(),
+                getFullVariantNum(connection, networkUuid, variantNum),
                 () -> getTombstonedIdentifiableIds(connection, networkUuid, variantNum),
                 () -> getTombstonedOperationalLimitsGroups(connection, networkUuid, variantNum),
                 variant -> getOperationalLimitsGroupsWithInClauseForVariant(connection, networkUuid, variant, columnNameForWhereClause, valuesForInClause, variantNum));
@@ -440,7 +440,7 @@ public class LimitsHandler {
         try (var connection = dataSource.getConnection()) {
             return PartialVariantUtils.getOperationalLimitsGroupsAttributes(
                     variantNum,
-                    getNetworkAttributes(connection, networkId, variantNum, mappings, mapper).getFullVariantNum(),
+                    getFullVariantNum(connection, networkId, variantNum),
                     () -> getTombstonedIdentifiableIds(connection, networkId, variantNum),
                     () -> getTombstonedOperationalLimitsGroups(connection, networkId, variantNum),
                     variant -> getSelectedOperationalLimitsGroupsForVariant(connection, networkId, variant, selectedOperationalLimitsGroups, variantNum));
@@ -503,7 +503,7 @@ public class LimitsHandler {
         try (var connection = dataSource.getConnection()) {
             return PartialVariantUtils.getExternalAttributes(
                     variantNum,
-                    getNetworkAttributes(connection, networkId, variantNum, mappings, mapper).getFullVariantNum(),
+                    getFullVariantNum(connection, networkId, variantNum),
                     () -> getTombstonedIdentifiableIds(connection, networkId, variantNum),
                     Set::of,
                     variant -> getSelectedOperationalLimitsGroupIdsForVariant(connection, networkId, variant, type, variantNum),
