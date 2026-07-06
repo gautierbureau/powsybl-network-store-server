@@ -738,20 +738,23 @@ public class NetworkStoreRepository {
 
     private <T extends IdentifiableAttributes> List<Resource<T>> getIdentifiablesWithInClauseForVariant(
             Connection connection, UUID networkUuid, int variantNum, TableMapping tableMapping, List<String> valuesForInClause, int variantNumOverride) {
-        if (valuesForInClause.isEmpty()) {
-            return Collections.emptyList();
-        }
-        try (var preparedStmt = connection.prepareStatement(buildGetIdentifiablesWithInClauseQuery(tableMapping.getTable(), tableMapping.getColumnsMapping().keySet(), valuesForInClause.size()))) {
-            preparedStmt.setObject(1, networkUuid);
-            preparedStmt.setInt(2, variantNum);
-            for (int i = 0; i < valuesForInClause.size(); i++) {
-                preparedStmt.setString(3 + i, valuesForInClause.get(i));
-            }
+        List<Resource<T>> identifiables = new ArrayList<>();
+        // build the in clause per partition so the placeholder count stays bounded (see BATCH_SIZE):
+        // a single in clause over an unbounded id list can exceed the database parameter limit
+        for (List<String> partition : Lists.partition(valuesForInClause, BATCH_SIZE)) {
+            try (var preparedStmt = connection.prepareStatement(buildGetIdentifiablesWithInClauseQuery(tableMapping.getTable(), tableMapping.getColumnsMapping().keySet(), partition.size()))) {
+                preparedStmt.setObject(1, networkUuid);
+                preparedStmt.setInt(2, variantNum);
+                for (int i = 0; i < partition.size(); i++) {
+                    preparedStmt.setString(3 + i, partition.get(i));
+                }
 
-            return getIdentifiablesInternal(variantNumOverride, preparedStmt, tableMapping);
-        } catch (SQLException e) {
-            throw new UncheckedSqlException(e);
+                identifiables.addAll(getIdentifiablesInternal(variantNumOverride, preparedStmt, tableMapping));
+            } catch (SQLException e) {
+                throw new UncheckedSqlException(e);
+            }
         }
+        return identifiables;
     }
 
     private <T extends IdentifiableAttributes> List<Resource<T>> getIdentifiablesInContainer(UUID networkUuid, int variantNum, String containerId,
@@ -1070,8 +1073,10 @@ public class NetworkStoreRepository {
         }
 
         try (var connection = dataSource.getConnection()) {
-            try (var preparedStmt = connection.prepareStatement(QueryCatalog.buildDeleteIdentifiablesQuery(tableName, ids.size()))) {
-                for (List<String> idsPartition : Lists.partition(ids, BATCH_SIZE)) {
+            // The prepared statement must be built per partition: the number of in clause placeholders
+            // has to match the partition size, otherwise placeholders beyond the partition size are left unbound
+            for (List<String> idsPartition : Lists.partition(ids, BATCH_SIZE)) {
+                try (var preparedStmt = connection.prepareStatement(QueryCatalog.buildDeleteIdentifiablesQuery(tableName, idsPartition.size()))) {
                     preparedStmt.setObject(1, networkUuid);
                     preparedStmt.setInt(2, variantNum);
 
@@ -2426,30 +2431,38 @@ public class NetworkStoreRepository {
 
     private Map<RegulatingOwnerInfo, RegulatingPointAttributes> getRegulatingPointsWithInClauseForVariant(
             Connection connection, UUID networkUuid, int variantNum, String columnNameForWhereClause, List<String> valuesForInClause, ResourceType type, int variantNumOverride) {
-        try (var preparedStmt = connection.prepareStatement(buildRegulatingPointsWithInClauseQuery(columnNameForWhereClause, valuesForInClause.size()))) {
-            preparedStmt.setObject(1, networkUuid);
-            preparedStmt.setInt(2, variantNum);
-            preparedStmt.setString(3, type.toString());
-            for (int i = 0; i < valuesForInClause.size(); i++) {
-                preparedStmt.setString(4 + i, valuesForInClause.get(i));
-            }
+        Map<RegulatingOwnerInfo, RegulatingPointAttributes> regulatingPoints = new HashMap<>();
+        for (List<String> partition : Lists.partition(valuesForInClause, BATCH_SIZE)) {
+            try (var preparedStmt = connection.prepareStatement(buildRegulatingPointsWithInClauseQuery(columnNameForWhereClause, partition.size()))) {
+                preparedStmt.setObject(1, networkUuid);
+                preparedStmt.setInt(2, variantNum);
+                preparedStmt.setString(3, type.toString());
+                for (int i = 0; i < partition.size(); i++) {
+                    preparedStmt.setString(4 + i, partition.get(i));
+                }
 
-            return innerGetRegulatingPoints(preparedStmt, type, variantNumOverride);
-        } catch (SQLException e) {
-            throw new UncheckedSqlException(e);
+                regulatingPoints.putAll(innerGetRegulatingPoints(preparedStmt, type, variantNumOverride));
+            } catch (SQLException e) {
+                throw new UncheckedSqlException(e);
+            }
         }
+        return regulatingPoints;
     }
 
     private void deleteRegulatingPoints(UUID networkUuid, int variantNum, List<String> equipmentIds, ResourceType type) {
         try (var connection = dataSource.getConnection()) {
-            try (var preparedStmt = connection.prepareStatement(buildDeleteRegulatingPointsVariantEquipmentINQuery(equipmentIds.size()))) {
-                preparedStmt.setObject(1, networkUuid);
-                preparedStmt.setInt(2, variantNum);
-                preparedStmt.setObject(3, type.toString());
-                for (int i = 0; i < equipmentIds.size(); i++) {
-                    preparedStmt.setString(4 + i, equipmentIds.get(i));
+            // build the in clause per partition so the placeholder count stays bounded (see BATCH_SIZE):
+            // a single in clause over an unbounded id list can exceed the database parameter limit
+            for (List<String> partition : Lists.partition(equipmentIds, BATCH_SIZE)) {
+                try (var preparedStmt = connection.prepareStatement(buildDeleteRegulatingPointsVariantEquipmentINQuery(partition.size()))) {
+                    preparedStmt.setObject(1, networkUuid);
+                    preparedStmt.setInt(2, variantNum);
+                    preparedStmt.setObject(3, type.toString());
+                    for (int i = 0; i < partition.size(); i++) {
+                        preparedStmt.setString(4 + i, partition.get(i));
+                    }
+                    preparedStmt.executeUpdate();
                 }
-                preparedStmt.executeUpdate();
             }
         } catch (SQLException e) {
             throw new UncheckedSqlException(e);
@@ -2505,20 +2518,21 @@ public class NetworkStoreRepository {
 
     private Map<OwnerInfo, List<ReactiveCapabilityCurvePointAttributes>> getReactiveCapabilityCurvePointsWithInClauseForVariant(
             Connection connection, UUID networkUuid, int variantNum, String columnNameForWhereClause, List<String> valuesForInClause, int variantNumOverride) {
-        if (valuesForInClause.isEmpty()) {
-            return Collections.emptyMap();
-        }
-        try (var preparedStmt = connection.prepareStatement(buildReactiveCapabilityCurvePointWithInClauseQuery(columnNameForWhereClause, valuesForInClause.size()))) {
-            preparedStmt.setObject(1, networkUuid);
-            preparedStmt.setInt(2, variantNum);
-            for (int i = 0; i < valuesForInClause.size(); i++) {
-                preparedStmt.setString(3 + i, valuesForInClause.get(i));
-            }
+        Map<OwnerInfo, List<ReactiveCapabilityCurvePointAttributes>> curvePoints = new HashMap<>();
+        for (List<String> partition : Lists.partition(valuesForInClause, BATCH_SIZE)) {
+            try (var preparedStmt = connection.prepareStatement(buildReactiveCapabilityCurvePointWithInClauseQuery(columnNameForWhereClause, partition.size()))) {
+                preparedStmt.setObject(1, networkUuid);
+                preparedStmt.setInt(2, variantNum);
+                for (int i = 0; i < partition.size(); i++) {
+                    preparedStmt.setString(3 + i, partition.get(i));
+                }
 
-            return innerGetReactiveCapabilityCurvePoints(preparedStmt, variantNumOverride);
-        } catch (SQLException e) {
-            throw new UncheckedSqlException(e);
+                curvePoints.putAll(innerGetReactiveCapabilityCurvePoints(preparedStmt, variantNumOverride));
+            } catch (SQLException e) {
+                throw new UncheckedSqlException(e);
+            }
         }
+        return curvePoints;
     }
 
     public Map<OwnerInfo, List<ReactiveCapabilityCurvePointAttributes>> getReactiveCapabilityCurvePoints(
@@ -2638,19 +2652,20 @@ public class NetworkStoreRepository {
 
     private Map<OwnerInfo, List<AreaBoundaryAttributes>> getAreaBoundariesWithInClauseForVariant(
             Connection connection, UUID networkUuid, int variantNum, String columnNameForWhereClause, List<String> valuesForInClause, int variantNumOverride) {
-        if (valuesForInClause.isEmpty()) {
-            return Collections.emptyMap();
-        }
-        try (var preparedStmt = connection.prepareStatement(buildAreaBoundaryWithInClauseQuery(columnNameForWhereClause, valuesForInClause.size()))) {
-            preparedStmt.setObject(1, networkUuid);
-            preparedStmt.setInt(2, variantNum);
-            for (int i = 0; i < valuesForInClause.size(); i++) {
-                preparedStmt.setString(3 + i, valuesForInClause.get(i));
+        Map<OwnerInfo, List<AreaBoundaryAttributes>> areaBoundaries = new HashMap<>();
+        for (List<String> partition : Lists.partition(valuesForInClause, BATCH_SIZE)) {
+            try (var preparedStmt = connection.prepareStatement(buildAreaBoundaryWithInClauseQuery(columnNameForWhereClause, partition.size()))) {
+                preparedStmt.setObject(1, networkUuid);
+                preparedStmt.setInt(2, variantNum);
+                for (int i = 0; i < partition.size(); i++) {
+                    preparedStmt.setString(3 + i, partition.get(i));
+                }
+                areaBoundaries.putAll(innerGetAreaBoundaries(preparedStmt, variantNumOverride));
+            } catch (SQLException e) {
+                throw new UncheckedSqlException(e);
             }
-            return innerGetAreaBoundaries(preparedStmt, variantNumOverride);
-        } catch (SQLException e) {
-            throw new UncheckedSqlException(e);
         }
+        return areaBoundaries;
     }
 
     public Map<OwnerInfo, List<AreaBoundaryAttributes>> getAreaBoundaries(UUID networkUuid, int variantNum, String columnNameForWhereClause, String valueForWhereClause) {
@@ -3251,13 +3266,15 @@ public class NetworkStoreRepository {
 
     private void deleteReactiveCapabilityCurvePoints(UUID networkUuid, int variantNum, List<String> equipmentIds) {
         try (var connection = dataSource.getConnection()) {
-            try (var preparedStmt = connection.prepareStatement(QueryCatalog.buildDeleteReactiveCapabilityCurvePointsVariantEquipmentINQuery(equipmentIds.size()))) {
-                preparedStmt.setObject(1, networkUuid);
-                preparedStmt.setInt(2, variantNum);
-                for (int i = 0; i < equipmentIds.size(); i++) {
-                    preparedStmt.setString(3 + i, equipmentIds.get(i));
+            for (List<String> partition : Lists.partition(equipmentIds, BATCH_SIZE)) {
+                try (var preparedStmt = connection.prepareStatement(QueryCatalog.buildDeleteReactiveCapabilityCurvePointsVariantEquipmentINQuery(partition.size()))) {
+                    preparedStmt.setObject(1, networkUuid);
+                    preparedStmt.setInt(2, variantNum);
+                    for (int i = 0; i < partition.size(); i++) {
+                        preparedStmt.setString(3 + i, partition.get(i));
+                    }
+                    preparedStmt.executeUpdate();
                 }
-                preparedStmt.executeUpdate();
             }
         } catch (SQLException e) {
             throw new UncheckedSqlException(e);
@@ -3299,13 +3316,15 @@ public class NetworkStoreRepository {
 
     private void deleteAreaBoundaries(UUID networkUuid, int variantNum, List<String> areaIds) {
         try (var connection = dataSource.getConnection()) {
-            try (var preparedStmt = connection.prepareStatement(QueryCatalog.buildDeleteAreaBoundariesVariantEquipmentINQuery(areaIds.size()))) {
-                preparedStmt.setObject(1, networkUuid);
-                preparedStmt.setInt(2, variantNum);
-                for (int i = 0; i < areaIds.size(); i++) {
-                    preparedStmt.setString(3 + i, areaIds.get(i));
+            for (List<String> partition : Lists.partition(areaIds, BATCH_SIZE)) {
+                try (var preparedStmt = connection.prepareStatement(QueryCatalog.buildDeleteAreaBoundariesVariantEquipmentINQuery(partition.size()))) {
+                    preparedStmt.setObject(1, networkUuid);
+                    preparedStmt.setInt(2, variantNum);
+                    for (int i = 0; i < partition.size(); i++) {
+                        preparedStmt.setString(3 + i, partition.get(i));
+                    }
+                    preparedStmt.executeUpdate();
                 }
-                preparedStmt.executeUpdate();
             }
         } catch (SQLException e) {
             throw new UncheckedSqlException(e);
@@ -3352,16 +3371,20 @@ public class NetworkStoreRepository {
 
     private Map<OwnerInfo, List<TapChangerStepAttributes>> getTapChangerStepsWithInClause(
             Connection connection, UUID networkUuid, int variantNum, String columnNameForWhereClause, List<String> valuesForInClause, int variantNumOverride) {
-        try (var preparedStmt = connection.prepareStatement(buildTapChangerStepWithInClauseQuery(columnNameForWhereClause, valuesForInClause.size()))) {
-            preparedStmt.setObject(1, networkUuid);
-            preparedStmt.setInt(2, variantNum);
-            for (int i = 0; i < valuesForInClause.size(); i++) {
-                preparedStmt.setString(3 + i, valuesForInClause.get(i));
+        Map<OwnerInfo, List<TapChangerStepAttributes>> tapChangerSteps = new HashMap<>();
+        for (List<String> partition : Lists.partition(valuesForInClause, BATCH_SIZE)) {
+            try (var preparedStmt = connection.prepareStatement(buildTapChangerStepWithInClauseQuery(columnNameForWhereClause, partition.size()))) {
+                preparedStmt.setObject(1, networkUuid);
+                preparedStmt.setInt(2, variantNum);
+                for (int i = 0; i < partition.size(); i++) {
+                    preparedStmt.setString(3 + i, partition.get(i));
+                }
+                tapChangerSteps.putAll(innerGetTapChangerSteps(preparedStmt, variantNumOverride));
+            } catch (SQLException e) {
+                throw new UncheckedSqlException(e);
             }
-            return innerGetTapChangerSteps(preparedStmt, variantNumOverride);
-        } catch (SQLException e) {
-            throw new UncheckedSqlException(e);
         }
+        return tapChangerSteps;
     }
 
     public Map<OwnerInfo, List<TapChangerStepAttributes>> getTapChangerSteps(UUID networkUuid, int variantNum, String columnNameForWhereClause, String valueForWhereClause) {
@@ -3579,14 +3602,15 @@ public class NetworkStoreRepository {
 
     private void deleteTapChangerSteps(UUID networkUuid, int variantNum, List<String> equipmentIds) {
         try (var connection = dataSource.getConnection()) {
-
-            try (var preparedStmt = connection.prepareStatement(QueryCatalog.buildDeleteTapChangerStepVariantEquipmentINQuery(equipmentIds.size()))) {
-                preparedStmt.setObject(1, networkUuid);
-                preparedStmt.setInt(2, variantNum);
-                for (int i = 0; i < equipmentIds.size(); i++) {
-                    preparedStmt.setString(3 + i, equipmentIds.get(i));
+            for (List<String> partition : Lists.partition(equipmentIds, BATCH_SIZE)) {
+                try (var preparedStmt = connection.prepareStatement(QueryCatalog.buildDeleteTapChangerStepVariantEquipmentINQuery(partition.size()))) {
+                    preparedStmt.setObject(1, networkUuid);
+                    preparedStmt.setInt(2, variantNum);
+                    for (int i = 0; i < partition.size(); i++) {
+                        preparedStmt.setString(3 + i, partition.get(i));
+                    }
+                    preparedStmt.executeUpdate();
                 }
-                preparedStmt.executeUpdate();
             }
         } catch (SQLException e) {
             throw new UncheckedSqlException(e);

@@ -590,6 +590,32 @@ class NetworkStoreRepositoryPartialVariantIdentifiablesTest {
     }
 
     @Test
+    void updateIdentifiablesSvNotExistingInPartialVariantWithMoreResourcesThanBatchSize() {
+        createFullVariantNetwork(networkStoreRepository, NETWORK_UUID, "network1", 0, "variant0");
+        // more loads than one batch, so retrieving them from the full variant spans several in clause partitions
+        int count = Utils.BATCH_SIZE + 1;
+        List<Resource<LoadAttributes>> loads = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            loads.add(buildLoad("load" + i, 0, "vl1"));
+        }
+        networkStoreRepository.createLoads(NETWORK_UUID, loads);
+        networkStoreRepository.cloneNetworkVariant(NETWORK_UUID, 0, 1, "variant1");
+
+        // SV update of every load on the partial variant: none exist there yet, so all are
+        // retrieved from the full variant in a single call (as a load flow save does)
+        List<Resource<InjectionSvAttributes>> loadsSv = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            loadsSv.add(Resource.create(ResourceType.LOAD, "load" + i, 1,
+                    InjectionSvAttributes.builder().p(9.9).q(8.8).build()));
+        }
+        networkStoreRepository.updateLoadsSv(NETWORK_UUID, loadsSv);
+
+        List<Resource<LoadAttributes>> updatedLoads = networkStoreRepository.getLoads(NETWORK_UUID, 1);
+        assertEquals(count, updatedLoads.size());
+        assertTrue(updatedLoads.stream().allMatch(load -> load.getAttributes().getP() == 9.9 && load.getAttributes().getQ() == 8.8));
+    }
+
+    @Test
     void updateIdentifiablesSvNotExistingInPartialVariant() {
         String networkId = "network1";
         String loadId = "load";
