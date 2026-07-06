@@ -107,7 +107,6 @@ public class Mappings {
                                                    boundaryLineMappings,
                                                    shuntCompensatorMappings,
                                                    vscConverterStationMappings,
-                                                   vscConverterStationMappings,
                                                    lccConverterStationMappings,
                                                    staticVarCompensatorMappings,
                                                    hvdcLineMappings,
