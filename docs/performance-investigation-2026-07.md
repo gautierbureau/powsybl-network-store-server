@@ -175,6 +175,48 @@ psql -U postgres -c "DROP DATABASE iidm" -c "CREATE DATABASE iidm"
 The benchmark settles statistics after seeding so its figures reflect steady state; comment out
 the seed's `ANALYZE` to reproduce the F1 pathology.
 
+## RAM profile of the running server
+
+The repository benchmark cannot see process memory, so the write and read paths were also
+profiled end to end on the production stack — the exec jar as its own GC-logged JVM, the real
+REST client, and a 1-second RSS sampler on the server process. Tooling and instructions live in
+[`benchmark/ram/`](../benchmark/ram/README.md).
+
+Test subject: a PEGASE 13 659-bus network converted to node-breaker topology and completed with
+realistic data (13 659 busbar sections, 118k switches, 39.8k operational limit groups, 4 092
+generator extensions) — a 72 MB XIIDM, ~280k rows and 106 MB in PostgreSQL.
+
+Measured on the session branch build, server `-Xmx2g` unless stated:
+
+| Scenario | Server RSS peak | Wall time |
+|---|---:|---:|
+| idle after startup | ~600 MB | — |
+| import of the 72 MB XIIDM | 686 MB | 22.7 s |
+| 1 whole-network read (COLLECTION preloading) | 757 MB | 5.9 s |
+| 4 concurrent whole-network reads | 1.34 GB | ~13 s each |
+| 8 concurrent whole-network reads | 1.90 GB | ~28 s each |
+| 4 concurrent reads, server capped at `-Xmx768m` | 986 MB | ~15 s each |
+
+Zero full GCs in every scenario, including the constrained one.
+
+What the numbers mean:
+
+- **The write path is flat.** Imports stream through in 1000-resource batches; a 72 MB network
+  costs the server well under 100 MB of RSS growth. RAM peaks do not come from imports.
+- **The apparent ~150 MB per concurrent reader is G1 slack, not live data.** The constrained run
+  is the proof: capped at 768 MB, the same 4-reader load ran essentially as fast (15 s vs 13 s)
+  with *less* total GC pause time (0.8 s vs 3.9 s — smaller heaps mean smaller, cheaper young
+  collections). G1 lazily fills whatever heap it is given with short-lived serialization garbage
+  and never uncommits it, so RSS ratchets up to the ceiling and stays there. Multi-GB RSS on a
+  deployed server is therefore not by itself evidence of a leak — size the heap to the live set
+  and let GC frequency, not RSS, be the signal.
+- **The genuine scaling limit is response materialization.** Each collection GET builds the
+  complete resource list and its JSON document in server heap before sending — ~75 MB of JSON
+  per whole-network read for this network, 26 MB for the switches endpoint alone — and this
+  grows linearly with network size and with reader concurrency. At CGMES continental scale
+  (~8× this network) the switches response alone would approach 200 MB per concurrent reader,
+  and streaming serialization or pagination becomes the fix that matters, not more heap.
+
 ## State of the work
 
 - All changes are pushed on branch `claude/session-unu7cf`, commits `77fb789` (round 1) and
