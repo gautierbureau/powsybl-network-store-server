@@ -1,0 +1,138 @@
+# Plan — faster DB → Jackson deserialization on the read path
+
+Goal: make the server's read path (PostgreSQL rows → attribute objects → JSON response)
+as fast as possible. The network-store client is used by other servers, so the wire
+format is treated as frozen: every change below must produce byte-equivalent (or at
+least semantically identical, golden-diff-verified) HTTP responses.
+
+## The pipeline today, and why it is structurally slow
+
+A collection read (`GET /networks/{uuid}/{variant}/loads`, …) makes **two full Jackson
+passes** over the same data:
+
+1. **DB → POJO.** Scalar columns are bound through `ColumnMapping` lambdas, but every
+   complex column — regulating points, reactive limits, temporary limits, properties
+   maps, tap changer steps, extensions — is stored as a JSON string and parsed with
+   `mapper.readValue(resultSet.getString(...), X.class)`, one databind call **per cell**
+   (`Utils.bindAttributes`, `ExtensionHandler`, `LimitsHandler`,
+   `NetworkStoreRepository` regulating-point/area/tap-changer readers). Some call sites
+   allocate a fresh `TypeReference` inside the row loop.
+2. **POJO → HTTP JSON.** The fully materialized `List<Resource<T>>` is wrapped in a
+   `TopLevelDocument` and re-serialized by Spring MVC's Jackson converter. The nested
+   attributes that were just parsed from DB JSON are written back out as JSON,
+   unchanged.
+
+For a pass-through read the server parses JSON it already had, builds objects it never
+inspects, and re-serializes them to nearly identical JSON. Everything else is tuning
+around that structural fact.
+
+## What existing measurements already tell us
+
+- Scalar-binding micro-optimization is **not** where the time is: the row-binding
+  fast-path work (typed ResultSet accessors, cached MapType) measured only modest
+  gains on a real PostgreSQL (see `performance-investigation-2026-07.md`, F5).
+- Repository-level `getLoads` on 100k rows is ~94 ms; the same data served over HTTP
+  is far more expensive, and a whole-network read of the 13k-bus reference network
+  materializes ~75 MB of JSON in server heap (26 MB for the switches collection
+  alone) — the response-production layer dominates both CPU and the RAM peaks
+  (see the RAM profile section of the investigation doc).
+- Neither Jackson mapper (repository or Spring MVC) registers an accelerator module;
+  all databind goes through reflection.
+
+## Levers, ranked
+
+### A. Cheap and safe — Jackson hygiene (days, low risk)
+
+- Cache an `ObjectReader` per JSON column type (e.g. held in `ColumnMapping`) instead
+  of `mapper.readValue(String, Class)` per cell; hoist per-call `TypeReference`
+  allocations out of row loops.
+- Register **Blackbird** on both mappers (repository + Spring response) — generated
+  accessors instead of reflection, typically 15–30 % on databind-heavy paths.
+- Expected: 10–30 % on JSON-heavy reads. Measurable in an afternoon with the
+  benchmarks below.
+
+### B. Structural — stop round-tripping JSON through POJOs (the real win)
+
+- **Audit** each JSON column: pure pass-through, or inspected server-side?
+  Partial-variant resolution works at row granularity (which id exists in which
+  variant), not field granularity, so most attribute JSON should be opaque.
+- **B1 — raw pass-through:** for opaque columns, carry the DB string to the response
+  writer and emit it with `writeRawValue` — zero parse, zero re-serialize, wire format
+  unchanged. Needs either a raw-holder in the model or a server-side custom
+  serializer keyed per column.
+- **B2 — streaming endpoints:** for the heaviest collection GETs, build the response
+  with the Jackson streaming API while iterating the `ResultSet` — scalars written
+  directly, JSON columns raw-copied — never constructing attribute POJOs. Turns the
+  read path into a DB→socket pipe, and makes per-request server memory constant
+  instead of linear in network size (this is also the fix for the response-
+  materialization RAM ceiling).
+- Caveat: paths that *assemble* attributes from satellite tables (regulating points,
+  operational limits groups, tap changer steps merged into parent attributes) need a
+  streaming merge or stay on the POJO path initially.
+
+### C. Adjacent, out of scope here
+
+The client-side parse in the servers that consume network-store is the mirror image;
+registering Blackbird there is a one-line change in the client repository.
+
+## Phased plan with measurement gates
+
+| Phase | Content | Gate |
+|---|---|---|
+| 0 | Profile: JFR/async-profiler on the repository benchmark and on the REST read benchmark; produce a "JDBC / scalar bind / JSON-cell parse / response serialization" breakdown | breakdown table published |
+| A | ObjectReader caching, TypeReference hoisting, Blackbird on both mappers | benchmark delta, keep what measures |
+| B1 | Raw pass-through for audited opaque JSON columns | golden-diff response equality + benchmark delta |
+| B2 | Streaming DB→JSON for the heaviest collection endpoints, opt-in per endpoint | golden-diff + latency + server RSS (benchmark/ram tooling) |
+
+Every phase measured on a fresh, `ANALYZE`d database (methodology of
+`performance-investigation-2026-07.md`), on both the synthetic seed and the committed
+PEGASE 13k reference network.
+
+## Measurement rig
+
+- **Repository level:** `PerfBenchmarkPostgresIT` (opt-in `-Dpgbench=true`) — already
+  exists on the benchmark branch.
+- **Full HTTP path:** `RestReadBenchmarkIT` (opt-in `-Drestbench=true`, added with
+  this doc) — boots the real server on a random port, seeds a JSON-heavy network
+  (regulating points, reactive limits, properties, tap changer steps), then measures
+  `GET` collection endpoints end to end, reporting median latency and payload size.
+  Consuming raw bytes over HTTP is deliberate: it exercises controller → repository →
+  PostgreSQL → POJO → Jackson → socket while spending no benchmark CPU on client-side
+  deserialization. The powsybl network-store client is *not* needed — and not wanted —
+  for server profiling; it is only useful for end-to-end scenarios (see
+  `benchmark/ram/`).
+
+## Baseline (2026-07-23, fresh analyzed DB, medians of 15)
+
+`RestReadBenchmarkIT` seed: 100k loads (properties map), 20k generators (regulating
+point + reactive limits), 5k two-windings transformers (25-step ratio tap changer
+each), 50k switches (near-scalar).
+
+| Endpoint | Payload | HTTP median | µs/row | Repository-level reference |
+|---|---:|---:|---:|---:|
+| `GET /loads` (100k) | 28.4 MB | 786 ms | 7.9 | ~94 ms |
+| `GET /generators` (20k) | 15.8 MB | 337 ms | 16.8 | — |
+| `GET /2-windings-transformers` (5k) | 10.2 MB | 468 ms | 93.5 | — |
+| `GET /switches` (50k) | 8.9 MB | 180 ms | 3.6 | — |
+| `GET /loads/load42` | 291 B | 4.3 ms | — | — |
+| `GET /identifiables/gen42` | 796 B | 9.6 ms | — | — |
+
+Two conclusions fall out immediately:
+
+- **~85 % of a collection read happens above the repository.** 100k loads cost
+  ~94 ms at repository level but 786 ms over HTTP on localhost — the POJO→Jackson
+  response production dominates roughly 7:1. Phase B aims at the right layer.
+- **Per-row cost tracks JSON/satellite density**: 3.6 µs (switches, scalar-only) →
+  7.9 µs (loads, one properties map) → 16.8 µs (generators, two JSON columns) →
+  93.5 µs (transformers, tap changer steps merged from a satellite table and
+  serialized back). The JSON columns, not the scalars, are the cost drivers —
+  consistent with the F5 result that scalar binding tuning moves little.
+
+## Open questions
+
+1. Is the wire format strictly frozen? (Assumed yes — golden-diff equality is the
+   acceptance test for B1/B2.)
+2. Can the model classes (client repository) be touched if B1 needs a raw-holder
+   type, or must the first iteration stay server-only?
+3. Which endpoints dominate production traffic — whole-collection reads by loadflow
+   workers, or single-identifiable gets — to aim B2 at the right tables first?
