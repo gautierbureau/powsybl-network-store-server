@@ -56,6 +56,10 @@
     <dependencies>
         <!-- compile scope -->
         <dependency>
+            <groupId>com.fasterxml.jackson.module</groupId>
+            <artifactId>jackson-module-blackbird</artifactId>
+        </dependency>
+        <dependency>
             <groupId>com.powsybl</groupId>
             <artifactId>powsybl-network-store-model</artifactId>
         </dependency>
