@@ -69,21 +69,21 @@ public final class Utils {
     static void bindAttributes(ResultSet resultSet, int columnIndex, ColumnMapping columnMapping, IdentifiableAttributes attributes, ObjectMapper mapper) {
         try {
             Object value = null;
-            if (columnMapping.getClassR() == null || isCustomTypeJsonified(columnMapping.getClassR())) {
-                String str = resultSet.getString(columnIndex);
-                if (str != null) {
-                    if (columnMapping.getClassMapKey() != null && columnMapping.getClassMapValue() != null) {
-                        value = columnMapping.getReader(mapper).readValue(str);
-                    } else {
-                        if (columnMapping.getClassR() == null) {
-                            throw new PowsyblException("Invalid mapping config");
-                        }
-                        if (columnMapping.getClassR() == Instant.class) {
-                            value = resultSet.getTimestamp(columnIndex).toInstant();
-                        } else {
-                            value = columnMapping.getReader(mapper).readValue(str);
-                        }
+            if (columnMapping.getClassR() == Instant.class) {
+                var timestamp = resultSet.getTimestamp(columnIndex);
+                if (timestamp != null) {
+                    value = timestamp.toInstant();
+                }
+            } else if (columnMapping.getClassR() == null || isCustomTypeJsonified(columnMapping.getClassR())) {
+                // feed Jackson the raw UTF-8 bytes: its byte-based parser skips the
+                // String allocation and charset decode that getString would pay
+                byte[] bytes = resultSet.getBytes(columnIndex);
+                if (bytes != null) {
+                    if (columnMapping.getClassMapKey() == null && columnMapping.getClassMapValue() == null
+                            && columnMapping.getClassR() == null) {
+                        throw new PowsyblException("Invalid mapping config");
                     }
+                    value = columnMapping.getReader(mapper).readValue(bytes);
                 }
             } else {
                 value = resultSet.getObject(columnIndex, columnMapping.getClassR());

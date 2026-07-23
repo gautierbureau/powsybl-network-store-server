@@ -6,7 +6,6 @@
  */
 package com.powsybl.network.store.server;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,6 +37,7 @@ import org.springframework.stereotype.Repository;
 import org.springframework.util.CollectionUtils;
 
 import javax.sql.DataSource;
+import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -2587,14 +2587,14 @@ public class NetworkStoreRepository {
                 reactiveCapabilityCurvePoint.setMaxQ(resultSet.getDouble(6));
                 reactiveCapabilityCurvePoint.setP(resultSet.getDouble(7));
                 if (!StringUtils.isEmpty(resultSet.getString(8))) {
-                    Map<String, String> pointProperties = getPropertiesReader().readValue(resultSet.getString(8));
+                    Map<String, String> pointProperties = getPropertiesReader().readValue(resultSet.getBytes(8));
                     reactiveCapabilityCurvePoint.setProperties(pointProperties);
                 }
                 map.computeIfAbsent(owner, k -> new ArrayList<>());
                 map.get(owner).add(reactiveCapabilityCurvePoint);
             }
             return map;
-        } catch (JsonProcessingException e) {
+        } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
@@ -2721,14 +2721,14 @@ public class NetworkStoreRepository {
                 }
                 areaBoundary.setAc(resultSet.getBoolean(6));
                 if (!StringUtils.isEmpty(resultSet.getString(7))) {
-                    Map<String, String> areaBoundaryProperties = getPropertiesReader().readValue(resultSet.getString(7));
+                    Map<String, String> areaBoundaryProperties = getPropertiesReader().readValue(resultSet.getBytes(7));
                     areaBoundary.setProperties(areaBoundaryProperties);
                 }
                 map.computeIfAbsent(owner, k -> new ArrayList<>());
                 map.get(owner).add(areaBoundary);
             }
             return map;
-        } catch (JsonProcessingException e) {
+        } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
@@ -3426,7 +3426,7 @@ public class NetworkStoreRepository {
                 owner.setVariantNum(variantNumOverride);
 
                 TapChangerType tapChangerType = TapChangerType.valueOf(resultSet.getString(5));
-                String tapChangerStepData = resultSet.getString(6);
+                byte[] tapChangerStepData = resultSet.getBytes(6);
                 List<TapChangerStepSqlData> parsedTapChangerStepSqlData = getTapChangerStepsReader().readValue(tapChangerStepData);
                 List<TapChangerStepAttributes> tapChangerStepAttributesList = parsedTapChangerStepSqlData.stream()
                     .map(data -> data.toTapChangerStepAttributes(tapChangerType)).collect(Collectors.toList());
@@ -3439,7 +3439,7 @@ public class NetworkStoreRepository {
                 }
             }
             return map;
-        } catch (JsonProcessingException e) {
+        } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }

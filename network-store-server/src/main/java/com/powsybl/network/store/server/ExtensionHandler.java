@@ -6,7 +6,6 @@
  */
 package com.powsybl.network.store.server;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import com.google.common.collect.Lists;
@@ -15,6 +14,7 @@ import com.powsybl.network.store.server.dto.OwnerInfo;
 import com.powsybl.network.store.server.exceptions.UncheckedSqlException;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -162,10 +162,10 @@ public class ExtensionHandler {
     private Optional<ExtensionAttributes> innerGetExtensionAttributes(PreparedStatement preparedStmt) throws SQLException {
         try (ResultSet resultSet = preparedStmt.executeQuery()) {
             if (resultSet.next()) {
-                return Optional.of(getExtensionAttributesReader().readValue(resultSet.getString(1)));
+                return Optional.of(getExtensionAttributesReader().readValue(resultSet.getBytes(1)));
             }
             return Optional.empty();
-        } catch (JsonProcessingException e) {
+        } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
@@ -219,11 +219,11 @@ public class ExtensionHandler {
             Map<String, ExtensionAttributes> map = new HashMap<>();
             while (resultSet.next()) {
                 String equipmentId = resultSet.getString(1);
-                ExtensionAttributes extensionValue = getExtensionAttributesReader().readValue(resultSet.getString(2));
+                ExtensionAttributes extensionValue = getExtensionAttributesReader().readValue(resultSet.getBytes(2));
                 map.put(equipmentId, extensionValue);
             }
             return map;
-        } catch (JsonProcessingException e) {
+        } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
@@ -272,11 +272,11 @@ public class ExtensionHandler {
             Map<String, ExtensionAttributes> map = new HashMap<>();
             while (resultSet.next()) {
                 String extensionName = resultSet.getString(1);
-                ExtensionAttributes extensionValue = getExtensionAttributesReader().readValue(resultSet.getString(2));
+                ExtensionAttributes extensionValue = getExtensionAttributesReader().readValue(resultSet.getBytes(2));
                 map.put(extensionName, extensionValue);
             }
             return map;
-        } catch (JsonProcessingException e) {
+        } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
@@ -342,11 +342,11 @@ public class ExtensionHandler {
             while (resultSet.next()) {
                 String equipmentId = resultSet.getString(1);
                 String extensionName = resultSet.getString(2);
-                ExtensionAttributes extensionValue = getExtensionAttributesReader().readValue(resultSet.getString(3));
+                ExtensionAttributes extensionValue = getExtensionAttributesReader().readValue(resultSet.getBytes(3));
                 map.computeIfAbsent(equipmentId, k -> new HashMap<>()).put(extensionName, extensionValue);
             }
             return map;
-        } catch (JsonProcessingException e) {
+        } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
