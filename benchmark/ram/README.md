@@ -23,6 +23,14 @@ conversion first, then* `add_current_limits.py` *and* `complete_network.py` —
 `bus_to_node_breaker.py` rebuilds the network without copying operational limits
 groups or generator extensions, so running it last silently drops them.
 
+`../networks/activsg70k-nodebreaker-limits.xiidm.gz` is the same pipeline applied to
+the MATPOWER ACTIVSg70k case (source in `../networks/sources/`): 70 000 buses,
+73 309 busbar sections, 455k switches, limits on 165 382 branch sides *including
+496k temporary limit tiers*, and 10 390 activePowerControl extensions — ~5× the
+PEGASE network (250 MB uncompressed), for testing at CGMES-continental scale.
+Pipeline cost: ~11 min and 3.4 GB peak python RSS (node-breaker 2m43s, limits
+4m51s, completion 3m44s).
+
 ## Setup
 
 Build the server and a client classpath (the network-store client comes in through the
