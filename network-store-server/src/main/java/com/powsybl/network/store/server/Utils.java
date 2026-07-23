@@ -73,7 +73,7 @@ public final class Utils {
                 String str = resultSet.getString(columnIndex);
                 if (str != null) {
                     if (columnMapping.getClassMapKey() != null && columnMapping.getClassMapValue() != null) {
-                        value = mapper.readValue(str, mapper.getTypeFactory().constructMapType(Map.class, columnMapping.getClassMapKey(), columnMapping.getClassMapValue()));
+                        value = columnMapping.getReader(mapper).readValue(str);
                     } else {
                         if (columnMapping.getClassR() == null) {
                             throw new PowsyblException("Invalid mapping config");
@@ -81,7 +81,7 @@ public final class Utils {
                         if (columnMapping.getClassR() == Instant.class) {
                             value = resultSet.getTimestamp(columnIndex).toInstant();
                         } else {
-                            value = mapper.readValue(str, columnMapping.getClassR());
+                            value = columnMapping.getReader(mapper).readValue(str);
                         }
                     }
                 }

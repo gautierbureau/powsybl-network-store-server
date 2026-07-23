@@ -6,8 +6,11 @@
  */
 package com.powsybl.network.store.server;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import lombok.NonNull;
 
+import java.util.Map;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 
@@ -21,6 +24,12 @@ public class ColumnMapping<T, R, U, K, O> {
     private BiConsumer<T, U> setter;
     private Class<K> classMapKey;
     private Class<O> classMapValue;
+    // One ObjectReader per column, built on first use and reused for every row:
+    // resolving the deserializer through ObjectMapper.readValue on every cell costs
+    // more than the actual parsing for small JSON columns. Benign race: ObjectReader
+    // is immutable and the mapper is a singleton, so concurrent first calls build
+    // identical readers and the reference write is atomic.
+    private ObjectReader reader;
 
     ColumnMapping(@NonNull Class<R> classR, @NonNull Function<T, R> getter, @NonNull BiConsumer<T, U> setter) {
         this(classR, getter, setter, null, null);
@@ -52,5 +61,14 @@ public class ColumnMapping<T, R, U, K, O> {
 
     Class<O> getClassMapValue() {
         return classMapValue;
+    }
+
+    ObjectReader getReader(ObjectMapper mapper) {
+        if (reader == null) {
+            reader = classMapKey != null && classMapValue != null
+                    ? mapper.readerFor(mapper.getTypeFactory().constructMapType(Map.class, classMapKey, classMapValue))
+                    : mapper.readerFor(classR);
+        }
+        return reader;
     }
 }

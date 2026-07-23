@@ -10,6 +10,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.google.common.base.Stopwatch;
@@ -77,6 +78,26 @@ public class NetworkStoreRepository {
     private final DataSource dataSource;
 
     private final ObjectMapper mapper;
+
+    // Readers reused for every row: per-call ObjectMapper.readValue with an ad-hoc
+    // TypeReference pays type and deserializer resolution each time. Built lazily on
+    // first use; benign race, identical readers, atomic reference write.
+    private ObjectReader propertiesReader;
+    private ObjectReader tapChangerStepsReader;
+
+    private ObjectReader getPropertiesReader() {
+        if (propertiesReader == null) {
+            propertiesReader = mapper.readerFor(new TypeReference<Map<String, String>>() { });
+        }
+        return propertiesReader;
+    }
+
+    private ObjectReader getTapChangerStepsReader() {
+        if (tapChangerStepsReader == null) {
+            tapChangerStepsReader = mapper.readerFor(new TypeReference<List<TapChangerStepSqlData>>() { });
+        }
+        return tapChangerStepsReader;
+    }
 
     private final Mappings mappings;
 
@@ -2566,7 +2587,7 @@ public class NetworkStoreRepository {
                 reactiveCapabilityCurvePoint.setMaxQ(resultSet.getDouble(6));
                 reactiveCapabilityCurvePoint.setP(resultSet.getDouble(7));
                 if (!StringUtils.isEmpty(resultSet.getString(8))) {
-                    Map<String, String> pointProperties = mapper.readValue(resultSet.getString(8), Map.class);
+                    Map<String, String> pointProperties = getPropertiesReader().readValue(resultSet.getString(8));
                     reactiveCapabilityCurvePoint.setProperties(pointProperties);
                 }
                 map.computeIfAbsent(owner, k -> new ArrayList<>());
@@ -2700,7 +2721,7 @@ public class NetworkStoreRepository {
                 }
                 areaBoundary.setAc(resultSet.getBoolean(6));
                 if (!StringUtils.isEmpty(resultSet.getString(7))) {
-                    Map<String, String> areaBoundaryProperties = mapper.readValue(resultSet.getString(7), Map.class);
+                    Map<String, String> areaBoundaryProperties = getPropertiesReader().readValue(resultSet.getString(7));
                     areaBoundary.setProperties(areaBoundaryProperties);
                 }
                 map.computeIfAbsent(owner, k -> new ArrayList<>());
@@ -3406,7 +3427,7 @@ public class NetworkStoreRepository {
 
                 TapChangerType tapChangerType = TapChangerType.valueOf(resultSet.getString(5));
                 String tapChangerStepData = resultSet.getString(6);
-                List<TapChangerStepSqlData> parsedTapChangerStepSqlData = mapper.readValue(tapChangerStepData, new TypeReference<>() { });
+                List<TapChangerStepSqlData> parsedTapChangerStepSqlData = getTapChangerStepsReader().readValue(tapChangerStepData);
                 List<TapChangerStepAttributes> tapChangerStepAttributesList = parsedTapChangerStepSqlData.stream()
                     .map(data -> data.toTapChangerStepAttributes(tapChangerType)).collect(Collectors.toList());
                 if (!tapChangerStepAttributesList.isEmpty()) {

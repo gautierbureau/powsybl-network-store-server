@@ -9,6 +9,7 @@ package com.powsybl.network.store.server;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.google.common.collect.Lists;
 import com.powsybl.network.store.model.*;
 import com.powsybl.network.store.server.dto.OperationalLimitsGroupOwnerInfo;
@@ -40,11 +41,33 @@ public class LimitsHandler {
     private final DataSource dataSource;
     private final ObjectMapper mapper;
     private final Mappings mappings;
+    // Readers reused for every row: per-call ObjectMapper.readValue with an ad-hoc
+    // TypeReference pays type and deserializer resolution each time. Built lazily
+    // because an ObjectReader snapshots the mapper configuration, and the shared
+    // mapper is still being configured (JavaTimeModule, date features) by
+    // NetworkStoreRepository's constructor after this bean is built.
+    // Benign race: readers built concurrently are identical and the write is atomic.
+    private ObjectReader temporaryLimitsReader;
+    private ObjectReader propertiesReader;
 
     public LimitsHandler(DataSource dataSource, ObjectMapper mapper, Mappings mappings) {
         this.dataSource = dataSource;
         this.mapper = mapper;
         this.mappings = mappings;
+    }
+
+    private ObjectReader getTemporaryLimitsReader() {
+        if (temporaryLimitsReader == null) {
+            temporaryLimitsReader = mapper.readerFor(new TypeReference<List<TemporaryLimitAttributes>>() { });
+        }
+        return temporaryLimitsReader;
+    }
+
+    private ObjectReader getPropertiesReader() {
+        if (propertiesReader == null) {
+            propertiesReader = mapper.readerFor(new TypeReference<Map<String, String>>() { });
+        }
+        return propertiesReader;
     }
 
     public Map<OwnerInfo, Map<Integer, Map<String, OperationalLimitsGroupAttributes>>> getOperationalLimitsGroupsAttributes(
@@ -174,8 +197,7 @@ public class LimitsHandler {
 
                 String propertiesData = resultSet.getString(16);
                 if (!StringUtils.isEmpty(propertiesData)) {
-                    Map<String, String> properties = mapper.readValue(propertiesData, new TypeReference<>() {
-                    });
+                    Map<String, String> properties = getPropertiesReader().readValue(propertiesData);
                     operationalLimitsGroupAttributes.setProperties(properties);
                 }
 
@@ -199,7 +221,7 @@ public class LimitsHandler {
         double permanentLimit = hasPermanentLimit ? permanentLimitData : Double.NaN;
         TreeMap<Integer, TemporaryLimitAttributes> temporaryLimits = null;
         if (hasTemporaryLimits) {
-            List<TemporaryLimitAttributes> temporaryLimitsList = mapper.readValue(temporaryLimitsData, new TypeReference<>() { });
+            List<TemporaryLimitAttributes> temporaryLimitsList = getTemporaryLimitsReader().readValue(temporaryLimitsData);
             temporaryLimits = new TreeMap<>();
             for (TemporaryLimitAttributes temporaryLimit : temporaryLimitsList) {
                 int duration = temporaryLimit.getAcceptableDuration();
@@ -209,7 +231,7 @@ public class LimitsHandler {
 
         Map<String, String> properties = null;
         if (!StringUtils.isEmpty(propertiesData)) {
-            properties = mapper.readValue(propertiesData, new TypeReference<>() { });
+            properties = getPropertiesReader().readValue(propertiesData);
         }
 
         return new LimitsAttributes(permanentLimit, temporaryLimits, properties);
