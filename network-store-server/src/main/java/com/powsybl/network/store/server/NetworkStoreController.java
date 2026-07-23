@@ -6,6 +6,7 @@
  */
 package com.powsybl.network.store.server;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.powsybl.network.store.model.*;
 import com.powsybl.network.store.model.svattributes.*;
 import io.swagger.v3.oas.annotations.Operation;
@@ -18,6 +19,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import java.util.*;
 import java.util.function.Consumer;
@@ -39,6 +41,12 @@ public class NetworkStoreController {
 
     @Autowired
     private NetworkStoreObserver networkStoreObserver;
+
+    @Autowired
+    private Mappings mappings;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     private <T extends IdentifiableAttributes> ResponseEntity<TopLevelDocument<T>> get(Supplier<Optional<Resource<T>>> f) {
         Optional<Resource<T>> optResource = networkStoreObserver.observeOne("get", f::get);
@@ -1045,10 +1053,39 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/switches", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get switches")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get switch list"))
-    public ResponseEntity<TopLevelDocument<SwitchAttributes>> getSwitches(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
-                                                                          @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
-                                                                          @Parameter(description = "Max number of switch to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getSwitches(networkId, variantNum), limit, ResourceType.SWITCH);
+    public ResponseEntity<StreamingResponseBody> getSwitches(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+                                                             @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
+                                                             @Parameter(description = "Max number of switch to get") @RequestParam(required = false) Integer limit) {
+        return getAllStreamed(networkId, variantNum, mappings.getSwitchMappings(), limit,
+            () -> repository.getSwitches(networkId, variantNum));
+    }
+
+    /**
+     * Serves a whole-collection read. Full-variant networks are streamed directly from
+     * the database (no attribute POJOs, no in-memory response document — constant
+     * per-request memory); partial variants, whose overlay resolution needs the
+     * in-memory collections, fall back to the materializing path serialized with the
+     * same mapper, so both branches produce the same bytes.
+     */
+    private <T extends IdentifiableAttributes> ResponseEntity<StreamingResponseBody> getAllStreamed(
+            UUID networkId, int variantNum, TableMapping tableMapping, Integer limit,
+            Supplier<List<Resource<T>>> materializingFallback) {
+        ResourceType resourceType = tableMapping.getResourceType();
+        if (repository.canStreamCollection(networkId, variantNum, tableMapping)) {
+            return ResponseEntity.ok()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(out -> {
+                        int count = repository.streamIdentifiablesCollection(networkId, variantNum, tableMapping, limit, out);
+                        // count recorded for observability; the fetch+serialization time of the
+                        // streamed path is not comparable to the fetch-only time observed on the
+                        // materializing path, so it is deliberately not measured here
+                        networkStoreObserver.observe("get.all", resourceType, count, () -> { });
+                    });
+        }
+        ResponseEntity<TopLevelDocument<T>> document = getAll(materializingFallback, limit, resourceType);
+        return ResponseEntity.status(document.getStatusCode())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(out -> objectMapper.writeValue(out, document.getBody()));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/switches/{switchId}", produces = APPLICATION_JSON_VALUE)
