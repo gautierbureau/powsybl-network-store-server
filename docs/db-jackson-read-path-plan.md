@@ -128,6 +128,57 @@ Two conclusions fall out immediately:
   serialized back). The JSON columns, not the scalars, are the cost drivers —
   consistent with the F5 result that scalar binding tuning moves little.
 
+## Phase 0 results — where the CPU actually goes (2026-07-23)
+
+Method-sampling profile of the real server (exec jar built from this branch, `-Xmx2g`,
+240 s JFR `settings=profile` recording, 13 116 execution samples) serving two
+concurrent clients looping over the four collection GETs of the ACTIVSg70k network
+(70k buses, 455k switches, 165k limit-group sides — `benchmark/networks/`).
+
+Samples on Tomcat worker threads, bucketed by stack content:
+
+| Category | Share of read-path CPU |
+|---|---:|
+| JSON parse, DB → POJO (Jackson databind + setup) | 30.0 % |
+| JSON serialize, POJO → HTTP (Jackson + converter) | 25.3 % |
+| Row binding incl. column `String` materialization | 23.1 % |
+| Repository logic (query building, resource assembly) | 6.0 % |
+| JDBC / PostgreSQL driver I/O | 4.1 % |
+| Satellite merge (limits, steps, regulating points) | 1.2 % |
+| Other (Tomcat/Spring, misc.) | 10.3 % |
+
+So **~78 % of read CPU is the double-conversion machinery** (parse + serialize +
+string materialization); the actual database fetch is ~4 %. The hot-methods view
+sharpens where inside those buckets the time sits:
+
+| Hot method | Share | Meaning |
+|---|---:|---|
+| `ObjectMapper._initForReading` | 14.3 % | per-`readValue` deserializer/type setup — **not parsing** |
+| `String.<init>(byte[]…)` (+ `TextBuffer.contentsAsString`) | 16.7 % | materializing column text and parser buffers as `String`s |
+| `Invokers$Holder.invokeExact_MT` + reflection accessors | 8.8 % | Jackson reflection + `ColumnMapping` lambda dispatch |
+| `TypeFactory._fromClass` | 4.1 % | more per-call type resolution |
+| `UTF8JsonGenerator.*` + bean/list serializers | ~11 % | actual response writing |
+| `VisibleBufferedInputStream.ensureBytes` + `PgResultSet.getObject` | 5.5 % | genuine driver I/O |
+| `java.util.logging.Logger.log` from `PgResultSet.getString` | 2.6 % | pgjdbc logs per `getString` call — pure call-volume overhead |
+| `ConcurrentHashMap.get` / `LinkedDeque.contains` / `ThreadLocal` | ~5.6 % | Jackson deserializer-cache lookups, again per `readValue` |
+
+Consequences for the phases:
+
+- **Phase A is bigger than estimated.** `_initForReading` + `TypeFactory` + the
+  cache-lookup churn ≈ **20 % of total read CPU** spent *setting up* `readValue`
+  calls, all of which cached `ObjectReader`s eliminate. With Blackbird on top
+  (the 8.8 % reflection bucket), phase A realistically targets 25–30 %, not 10–30 %
+  of the JSON-heavy share.
+- **Phase B attacks the rest**: raw pass-through removes the remaining parse time,
+  most of the 16.7 % string materialization, and much of the ~11 % re-serialization
+  for opaque columns.
+- **Free win found**: pgjdbc's per-`getString` `java.util.logging` calls cost 2.6 %
+  even with logging disabled at the JUL level; verify a hard-disabled driver logger
+  (`loggerLevel=OFF` / JUL config) in production images.
+- Satellite-table merging (1.2 %) is *not* a CPU problem at read time — B2's
+  streaming-merge complexity should not be paid for CPU reasons; it is only needed
+  where B2 streams those endpoints anyway.
+
 ## Open questions
 
 1. Is the wire format strictly frozen? (Assumed yes — golden-diff equality is the
