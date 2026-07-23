@@ -179,6 +179,42 @@ Consequences for the phases:
   streaming-merge complexity should not be paid for CPU reasons; it is only needed
   where B2 streams those endpoints anyway.
 
+## Phase A results — one keep, one honest rejection (2026-07-23)
+
+Both phase-A candidates were implemented on independent branches off `main` and
+measured with `RestReadBenchmarkIT` (fresh analyzed database per run, medians of 15).
+
+**A1 — cached `ObjectReader` per column (`claude/cached-object-readers`): FLAT.**
+All collection endpoints within run-to-run noise of the baseline. The phase-0
+attribution above was wrong about *which part* of `_initForReading` is eliminable:
+Jackson already caches root deserializers (the lookup is a `ConcurrentHashMap` hit),
+so what a cached reader saves is negligible. The dominant per-cell cost inside
+`_initForReading` is **`JsonParser` + `DeserializationContext` creation, which
+`ObjectReader` pays too**. There is no cheap way around it — the only way to not pay
+per-cell parser setup is to not parse (phase B). The branch is kept for its
+allocation hygiene (`TypeReference`-per-row removal) but not proposed as a
+performance change.
+
+**A2 — Blackbird (`claude/blackbird-jackson`, PR #17): KEEP.**
+
+| Endpoint | Baseline | Blackbird (2 runs) |
+|---|---:|---:|
+| 2-windings-transformers (5k, tap steps) | 375 ms | **300 / 304 ms (−19 to −20 %)** |
+| generators (20k) | 276 ms | 239 / 263 ms (−5 to −13 %) |
+| loads (100k) | 545 ms | 495 / 561 ms (noise) |
+| switches (50k, scalar) | 137 ms | 133 / 118 ms |
+
+The win lands where databind density is highest, matching the ~9 % reflection bucket
+plus part of the serializer bucket. Loads/switches stay put because their cost is
+string materialization and raw write throughput — Blackbird does not touch those.
+
+**Revised conclusion.** Phase A's realistic total is the Blackbird win (~5–20 %
+depending on endpoint), not the 25–30 % hoped for above: the per-`readValue` setup
+cost is structural, not a caching miss. This *strengthens* the case for phase B —
+raw pass-through / streaming is the only lever that removes parser setup, string
+materialization, and re-serialization together, which the profile puts at ~55–60 %
+of read CPU combined.
+
 ## Open questions
 
 1. Is the wire format strictly frozen? (Assumed yes — golden-diff equality is the
