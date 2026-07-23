@@ -7,6 +7,22 @@ load** — full network imports and concurrent whole-network reads. They run the
 production stack: the exec jar as its own JVM, the real REST client, and a 1-second
 RSS sampler on the server process.
 
+## Test network
+
+`../networks/pegase13k-nodebreaker-limits.xiidm.gz` is the network all reference
+measurements below were made with — powsybl importers read the `.xiidm.gz` directly,
+no unpacking needed. It is the MATPOWER PEGASE 13 659-bus case converted to
+node-breaker topology and completed with realistic data using
+[test2](https://github.com/gautierbureau/test2): 13 659 busbar sections, 118k
+switches, 39 798 operational limits groups (current limits on both sides of every
+branch) and 4 092 `activePowerControl` generator extensions. 72 MB uncompressed,
+~280k rows / 106 MB once imported into PostgreSQL.
+
+Note when rebuilding it: the test2 steps must run in the order *node-breaker
+conversion first, then* `add_current_limits.py` *and* `complete_network.py` —
+`bus_to_node_breaker.py` rebuilds the network without copying operational limits
+groups or generator extensions, so running it last silently drops them.
+
 ## Setup
 
 Build the server and a client classpath (the network-store client comes in through the
