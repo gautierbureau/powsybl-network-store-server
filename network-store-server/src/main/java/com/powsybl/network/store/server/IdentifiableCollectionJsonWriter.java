@@ -7,9 +7,13 @@
 package com.powsybl.network.store.server;
 
 import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.core.io.SerializedString;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializerProvider;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.ser.BeanPropertyWriter;
+import com.fasterxml.jackson.databind.ser.PropertyWriter;
 import com.powsybl.network.store.model.IdentifiableAttributes;
 
 import java.io.IOException;
@@ -17,20 +21,27 @@ import java.io.OutputStream;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
+
+import static com.powsybl.network.store.server.Utils.bindAttributes;
 
 /**
  * Streams a collection GET response (a {@code TopLevelDocument}) directly from a JDBC
  * {@link ResultSet}, without materializing attribute POJOs or the response document.
  *
  * <p>Wire-format equivalence with the POJO + Jackson databind path is obtained by
- * construction: the field order and the values of non-column and SQL-{@code NULL}
- * fields are taken from serializing a default attributes instance with the same
- * mapper that serves the POJO path, and JSON-typed columns are written back raw —
- * their content in the database is exactly what this mapper produced at write time.
+ * construction: field order comes from the bean serializer, unset fields take the
+ * value a default attributes instance serializes with, JSON-typed columns are written
+ * back raw (their stored text is exactly what this mapper produced at write time),
+ * and <em>composite</em> properties — several columns whose setters build one shared
+ * object, like a generator's reactive limits or a shunt's model — are rebuilt per row
+ * on a scratch attributes instance through the very same column setters, then emitted
+ * with the bean serializer's own property writer.
  *
- * <p>Not thread-safe; create one instance per response.
+ * <p>Thread-safe after construction; one instance per table is cached and shared.
  */
 public class IdentifiableCollectionJsonWriter {
 
@@ -38,25 +49,46 @@ public class IdentifiableCollectionJsonWriter {
         STRING, BOOLEAN, INTEGER, DOUBLE, RAW_JSON
     }
 
-    private record Column(String name, int sqlIndex, ColumnKind kind) {
+    private record Column(int sqlIndex, ColumnKind kind, ColumnMapping<?, ?, ?, ?, ?> mapping) {
     }
 
     /**
-     * One serialized attribute field, in serializer order. {@code column} is null for
-     * fields not backed by a table column; {@code defaultRaw} is the pre-serialized
-     * value an unset field carries (null when NON_NULL inclusion omits it entirely).
+     * Per-request satellite-table enrichment of one serialized field.
+     * Either raw pass-through values for a simple field ({@code rawById}, with
+     * {@code omitOnMiss} telling whether a row without an entry omits the field —
+     * matching setters that assign null on miss — or keeps its default), or
+     * {@code applierById} mutators applied to the scratch instance of a composite
+     * field before it is serialized (e.g. reactive capability curve points).
      */
-    private record FieldWriter(String name, Column column, String defaultRaw) {
+    public record SatelliteField(Map<String, String> rawById, boolean omitOnMiss,
+                                 Map<String, Consumer<IdentifiableAttributes>> applierById) {
+        public static SatelliteField raw(Map<String, String> rawById, boolean omitOnMiss) {
+            return new SatelliteField(rawById, omitOnMiss, null);
+        }
+
+        public static SatelliteField appliers(Map<String, Consumer<IdentifiableAttributes>> applierById) {
+            return new SatelliteField(null, false, applierById);
+        }
     }
+
+    /**
+     * One serialized attribute field, in serializer order. Simple fields are backed by
+     * at most one column ({@code column}, null for non-column fields) and fall back to
+     * {@code defaultRaw} (null = omitted). Composite fields ({@code members} non-null)
+     * are rebuilt per row via their columns' setters and written by {@code property}.
+     */
+    private record FieldWriter(String name, SerializedString encodedName, Column column, char[] defaultRaw,
+                               List<Column> members, BeanPropertyWriter property) {
+    }
+
+    // columns whose sentinel cannot be probed (interface-typed variant columns);
+    // resolution is by construction of the write-side mapping lambdas
+    private static final Map<String, String> PROPERTY_ALIASES = Map.of(
+            "linearModel", "model",
+            "nonLinearModel", "model");
 
     private final ObjectMapper mapper;
     private final TableMapping tableMapping;
-    // one entry per serialized attribute field, in the bean serializer's order, with
-    // everything precomputed: SQL index and kind for column-backed fields, and the
-    // pre-serialized default value an unset field carries. With the application's
-    // NON_NULL inclusion, a default of null means the field is omitted — which is
-    // exactly what the POJO path produces for a SQL-NULL column, since the setter is
-    // skipped and the field keeps its (null) default.
     private final List<FieldWriter> fieldWriters = new ArrayList<>();
 
     public IdentifiableCollectionJsonWriter(ObjectMapper mapper, TableMapping tableMapping) {
@@ -65,45 +97,55 @@ public class IdentifiableCollectionJsonWriter {
         IdentifiableAttributes defaultInstance = tableMapping.getAttributesSupplier().get();
         ObjectNode defaults = (ObjectNode) mapper.valueToTree(defaultInstance);
 
-        // column keys usually equal the serialized property name, but not always
-        // ("identifiableShortCircuit" -> identifiableShortCircuitAttributes,
-        // "fictitiousp0" -> fictitiousP0), so each column is resolved empirically: set
-        // a sentinel through the column's own setter on a probe instance, serialize it
-        // and see which property changed. Exactly one property must change, otherwise
-        // the table is refused (and the endpoint falls back to the POJO path).
-        Map<String, Column> columnsByField = new java.util.HashMap<>();
+        // resolve each column to its serialized property (probing, see below), keeping
+        // insertion order so composite members are re-applied in mapping order
+        Map<String, List<Column>> columnsByProperty = new LinkedHashMap<>();
         int sqlIndex = 2; // first selected column is the id
         for (Map.Entry<String, ColumnMapping> e : tableMapping.getColumnsMapping().entrySet()) {
-            String property = resolveSerializedProperty(mapper, tableMapping, e.getKey(), e.getValue(), defaults);
-            columnsByField.put(property, new Column(property, sqlIndex++, kindOf(e.getValue())));
+            String property = PROPERTY_ALIASES.containsKey(e.getKey())
+                    ? PROPERTY_ALIASES.get(e.getKey())
+                    : resolveSerializedProperty(mapper, tableMapping, e.getKey(), e.getValue(), defaults);
+            columnsByProperty.computeIfAbsent(property, p -> new ArrayList<>())
+                    .add(new Column(sqlIndex++, kindOf(e.getValue()), e.getValue()));
         }
 
         try {
             mapper.getSerializerProviderInstance()
                     .findValueSerializer(defaultInstance.getClass())
                     .properties()
-                    .forEachRemaining(property -> {
-                        String name = property.getName();
-                        JsonNode defaultValue = defaults.get(name);
-                        String defaultRaw;
-                        try {
-                            defaultRaw = defaultValue == null ? null : mapper.writeValueAsString(defaultValue);
-                        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-                            throw new java.io.UncheckedIOException(e);
-                        }
-                        fieldWriters.add(new FieldWriter(name, columnsByField.get(name), defaultRaw));
-                    });
+                    .forEachRemaining(property -> fieldWriters.add(toFieldWriter(property, columnsByProperty, defaults)));
         } catch (com.fasterxml.jackson.databind.JsonMappingException e) {
             throw new IllegalStateException("Cannot introspect serializer of " + defaultInstance.getClass(), e);
         }
 
-        // every column must have landed on a serialized property, or responses would drop it
-        for (String property : columnsByField.keySet()) {
+        for (String property : columnsByProperty.keySet()) {
             if (fieldWriters.stream().noneMatch(w -> property.equals(w.name()))) {
                 throw new IllegalStateException("Column property " + property + " of table " + tableMapping.getTable()
                         + " is not a serialized field; streaming would drop it");
             }
         }
+    }
+
+    private FieldWriter toFieldWriter(PropertyWriter property, Map<String, List<Column>> columnsByProperty, ObjectNode defaults) {
+        String name = property.getName();
+        JsonNode defaultValue = defaults.get(name);
+        char[] defaultRaw;
+        try {
+            defaultRaw = defaultValue == null ? null : mapper.writeValueAsString(defaultValue).toCharArray();
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+        SerializedString encodedName = new SerializedString(name);
+        List<Column> columns = columnsByProperty.get(name);
+        if (columns != null && columns.size() > 1) {
+            // several columns build one object through stateful setters: rebuilt per row
+            if (!(property instanceof BeanPropertyWriter beanProperty)) {
+                throw new IllegalStateException("Composite property " + name + " of table "
+                        + tableMapping.getTable() + " has no bean property writer");
+            }
+            return new FieldWriter(name, encodedName, null, defaultRaw, columns, beanProperty);
+        }
+        return new FieldWriter(name, encodedName, columns == null ? null : columns.get(0), defaultRaw, null, null);
     }
 
     @SuppressWarnings("unchecked")
@@ -213,27 +255,28 @@ public class IdentifiableCollectionJsonWriter {
     }
 
     /**
-     * Writes the complete {@code TopLevelDocument} for the rows of {@code resultSet}.
-     *
-     * <p>{@code satelliteRawByField} carries per-request enrichment for fields whose
-     * value comes from a satellite table rather than a column: serialized field name to
-     * (equipment id to pre-serialized JSON value). Rows without an entry get the
-     * field's default, mirroring the materializing path. Field names must be
-     * serialized, non-column-backed properties of the attributes.
+     * Writes the complete {@code TopLevelDocument} for the rows of {@code resultSet};
+     * see {@link SatelliteField} for the per-request enrichment contract.
      *
      * @return the number of rows written into {@code data}
      */
     public int write(ResultSet resultSet, int variantNum, Integer limit,
-                     Map<String, Map<String, String>> satelliteRawByField, OutputStream out) throws IOException, SQLException {
-        for (String fieldName : satelliteRawByField.keySet()) {
-            FieldWriter field = fieldWriters.stream().filter(w -> w.name().equals(fieldName)).findFirst()
-                    .orElseThrow(() -> new IllegalStateException("Satellite field " + fieldName
+                     Map<String, SatelliteField> satelliteByField, OutputStream out) throws IOException, SQLException {
+        for (Map.Entry<String, SatelliteField> e : satelliteByField.entrySet()) {
+            FieldWriter field = fieldWriters.stream().filter(w -> w.name().equals(e.getKey())).findFirst()
+                    .orElseThrow(() -> new IllegalStateException("Satellite field " + e.getKey()
                             + " is not a serialized property of table " + tableMapping.getTable()));
-            if (field.column() != null) {
-                throw new IllegalStateException("Satellite field " + fieldName + " of table "
+            boolean composite = field.members() != null;
+            if (composite && e.getValue().applierById() == null || !composite && e.getValue().rawById() == null) {
+                throw new IllegalStateException("Satellite field " + e.getKey() + " of table "
+                        + tableMapping.getTable() + " has the wrong enrichment kind");
+            }
+            if (!composite && field.column() != null) {
+                throw new IllegalStateException("Satellite field " + e.getKey() + " of table "
                         + tableMapping.getTable() + " is column-backed");
             }
         }
+        SerializerProvider provider = mapper.getSerializerProviderInstance();
         int totalCount = 0;
         try (JsonGenerator generator = mapper.getFactory().createGenerator(out)) {
             generator.writeStartObject();
@@ -243,7 +286,7 @@ public class IdentifiableCollectionJsonWriter {
                 if (limit != null && totalCount > limit) {
                     continue; // keep consuming rows: totalCount mirrors the POJO path meta
                 }
-                writeResource(generator, resultSet, variantNum, satelliteRawByField);
+                writeResource(generator, resultSet, variantNum, satelliteByField, provider);
             }
             generator.writeEndArray();
             generator.writeObjectFieldStart("meta");
@@ -255,7 +298,7 @@ public class IdentifiableCollectionJsonWriter {
     }
 
     private void writeResource(JsonGenerator generator, ResultSet resultSet, int variantNum,
-                               Map<String, Map<String, String>> satelliteRawByField) throws IOException, SQLException {
+                               Map<String, SatelliteField> satelliteByField, SerializerProvider provider) throws IOException, SQLException {
         String id = resultSet.getString(1);
         generator.writeStartObject();
         generator.writeStringField("type", tableMapping.getResourceType().name());
@@ -263,15 +306,18 @@ public class IdentifiableCollectionJsonWriter {
         generator.writeNumberField("variantNum", variantNum);
         generator.writeObjectFieldStart("attributes");
         for (FieldWriter field : fieldWriters) {
+            if (field.members() != null) {
+                writeComposite(generator, resultSet, field, satelliteByField.get(field.name()), id, provider);
+                continue;
+            }
             Column column = field.column();
             if (column == null) {
-                Map<String, String> satelliteRaw = satelliteRawByField.get(field.name());
-                String raw = satelliteRaw == null ? null : satelliteRaw.get(id);
+                SatelliteField satellite = satelliteByField.get(field.name());
+                String raw = satellite == null ? null : satellite.rawById().get(id);
                 if (raw != null) {
-                    generator.writeFieldName(field.name());
+                    generator.writeFieldName(field.encodedName());
                     generator.writeRawValue(raw);
-                } else {
-                    // not column-backed and no satellite value: the default
+                } else if (satellite == null || !satellite.omitOnMiss()) {
                     writeDefault(generator, field);
                 }
                 continue;
@@ -280,7 +326,8 @@ public class IdentifiableCollectionJsonWriter {
                 case STRING -> {
                     String value = resultSet.getString(column.sqlIndex());
                     if (value != null) {
-                        generator.writeStringField(field.name(), value);
+                        generator.writeFieldName(field.encodedName());
+                        generator.writeString(value);
                     } else {
                         writeDefault(generator, field);
                     }
@@ -288,7 +335,8 @@ public class IdentifiableCollectionJsonWriter {
                 case BOOLEAN -> {
                     boolean value = resultSet.getBoolean(column.sqlIndex());
                     if (!resultSet.wasNull()) {
-                        generator.writeBooleanField(field.name(), value);
+                        generator.writeFieldName(field.encodedName());
+                        generator.writeBoolean(value);
                     } else {
                         writeDefault(generator, field);
                     }
@@ -296,7 +344,8 @@ public class IdentifiableCollectionJsonWriter {
                 case INTEGER -> {
                     int value = resultSet.getInt(column.sqlIndex());
                     if (!resultSet.wasNull()) {
-                        generator.writeNumberField(field.name(), value);
+                        generator.writeFieldName(field.encodedName());
+                        generator.writeNumber(value);
                     } else {
                         writeDefault(generator, field);
                     }
@@ -304,7 +353,8 @@ public class IdentifiableCollectionJsonWriter {
                 case DOUBLE -> {
                     double value = resultSet.getDouble(column.sqlIndex());
                     if (!resultSet.wasNull()) {
-                        generator.writeNumberField(field.name(), value);
+                        generator.writeFieldName(field.encodedName());
+                        generator.writeNumber(value);
                     } else {
                         writeDefault(generator, field);
                     }
@@ -312,7 +362,7 @@ public class IdentifiableCollectionJsonWriter {
                 case RAW_JSON -> {
                     String value = resultSet.getString(column.sqlIndex());
                     if (value != null) {
-                        generator.writeFieldName(field.name());
+                        generator.writeFieldName(field.encodedName());
                         generator.writeRawValue(value);
                     } else {
                         writeDefault(generator, field);
@@ -324,13 +374,39 @@ public class IdentifiableCollectionJsonWriter {
         generator.writeEndObject();
     }
 
+    /**
+     * Rebuilds a composite property exactly like the POJO path: fresh attributes,
+     * the member columns' own setters in mapping order (null columns skipped, as in
+     * {@code bindAttributes}), then the satellite applier, then the bean serializer's
+     * property writer — which also enforces the same NON_NULL omission.
+     */
+    private void writeComposite(JsonGenerator generator, ResultSet resultSet, FieldWriter field,
+                                SatelliteField satellite, String id, SerializerProvider provider) throws SQLException {
+        IdentifiableAttributes scratch = tableMapping.getAttributesSupplier().get();
+        for (Column member : field.members()) {
+            bindAttributes(resultSet, member.sqlIndex(), member.mapping(), scratch, mapper);
+        }
+        if (satellite != null) {
+            Consumer<IdentifiableAttributes> applier = satellite.applierById().get(id);
+            if (applier != null) {
+                applier.accept(scratch);
+            }
+        }
+        try {
+            field.property().serializeAsField(scratch, generator, provider);
+        } catch (Exception e) {
+            throw new IllegalStateException("Cannot serialize composite property " + field.name()
+                    + " of table " + tableMapping.getTable(), e);
+        }
+    }
+
     private void writeDefault(JsonGenerator generator, FieldWriter field) throws IOException {
         // mirror the POJO path for an unset field: fields whose default serialization
         // is omitted (nullable, NON_NULL inclusion) are skipped; the others (primitive
         // defaults, empty extension map) write their pre-serialized default
         if (field.defaultRaw() != null) {
-            generator.writeFieldName(field.name());
-            generator.writeRawValue(field.defaultRaw());
+            generator.writeFieldName(field.encodedName());
+            generator.writeRawValue(field.defaultRaw(), 0, field.defaultRaw().length);
         }
     }
 }

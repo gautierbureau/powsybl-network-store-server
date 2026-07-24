@@ -1735,7 +1735,7 @@ public class NetworkStoreRepository {
     public int streamIdentifiablesCollection(UUID networkUuid, int variantNum, TableMapping tableMapping, Integer limit, OutputStream out) throws IOException {
         // satellite data (small: per-equipment enrichments) is materialized before the
         // main-table cursor opens; the bulky main rows still stream
-        Map<String, Map<String, String>> satelliteRawByField = satelliteRawFields(networkUuid, variantNum, tableMapping);
+        Map<String, IdentifiableCollectionJsonWriter.SatelliteField> satelliteByField = satelliteFields(networkUuid, variantNum, tableMapping);
         try (var connection = dataSource.getConnection()) {
             boolean previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
@@ -1744,7 +1744,7 @@ public class NetworkStoreRepository {
                 preparedStmt.setObject(1, networkUuid);
                 preparedStmt.setInt(2, variantNum);
                 try (ResultSet resultSet = preparedStmt.executeQuery()) {
-                    return collectionWriter(tableMapping).orElseThrow().write(resultSet, variantNum, limit, satelliteRawByField, out);
+                    return collectionWriter(tableMapping).orElseThrow().write(resultSet, variantNum, limit, satelliteByField, out);
                 }
             } finally {
                 connection.commit();
@@ -1756,21 +1756,74 @@ public class NetworkStoreRepository {
     }
 
     /**
-     * Pre-serialized satellite-table enrichment for the streamed collection read of
-     * {@code tableMapping}: field name to (equipment id to raw JSON). The values are
-     * produced by serializing exactly the objects the materializing path would set,
-     * with the same mapper, so both paths emit identical bytes.
+     * Satellite-table enrichment for the streamed collection read of
+     * {@code tableMapping} (see {@link IdentifiableCollectionJsonWriter.SatelliteField}).
+     * Raw values are produced by serializing exactly the objects the materializing
+     * path would set, with the same mapper; composite appliers reuse the very same
+     * injection code — so both paths emit identical bytes. The miss behavior mirrors
+     * each materializing setter: getOrDefault-style setters keep the field's default,
+     * plain map lookups null the field out (omitted under NON_NULL).
      */
-    private Map<String, Map<String, String>> satelliteRawFields(UUID networkUuid, int variantNum, TableMapping tableMapping) throws IOException {
+    private Map<String, IdentifiableCollectionJsonWriter.SatelliteField> satelliteFields(UUID networkUuid, int variantNum, TableMapping tableMapping) throws IOException {
         ResourceType type = tableMapping.getResourceType();
-        if (type != ResourceType.LOAD && type != ResourceType.LINE && type != ResourceType.BUSBAR_SECTION) {
-            return Map.of();
+        Map<String, IdentifiableCollectionJsonWriter.SatelliteField> fields = new HashMap<>();
+        switch (type) {
+            case LOAD, LINE, BUSBAR_SECTION ->
+                fields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), false));
+            case BATTERY -> {
+                fields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), false));
+                fields.put(REACTIVE_LIMITS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.appliers(curvePointAppliers(networkUuid, variantNum, type)));
+            }
+            case SHUNT_COMPENSATOR, STATIC_VAR_COMPENSATOR -> {
+                fields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), true));
+                fields.put(REGULATING_POINT_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingPoints(networkUuid, variantNum, type), true));
+            }
+            case GENERATOR, VSC_CONVERTER_STATION -> {
+                fields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), true));
+                fields.put(REGULATING_POINT_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingPoints(networkUuid, variantNum, type), true));
+                fields.put(REACTIVE_LIMITS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.appliers(curvePointAppliers(networkUuid, variantNum, type)));
+            }
+            default -> {
+                // satellite-free table
+            }
         }
+        return fields;
+    }
+
+    private static final String REGULATING_EQUIPMENTS_FIELD = "regulatingEquipments";
+    private static final String REGULATING_POINT_FIELD = "regulatingPoint";
+    private static final String REACTIVE_LIMITS_FIELD = "reactiveLimits";
+
+    private Map<String, String> rawRegulatingEquipments(UUID networkUuid, int variantNum, ResourceType type) throws IOException {
         Map<String, String> rawById = new HashMap<>();
         for (Map.Entry<OwnerInfo, Set<RegulatingEquipmentIdentifier>> entry : getRegulatingEquipments(networkUuid, variantNum, type).entrySet()) {
             rawById.put(entry.getKey().getEquipmentId(), mapper.writeValueAsString(entry.getValue()));
         }
-        return Map.of("regulatingEquipments", rawById);
+        return rawById;
+    }
+
+    private Map<String, String> rawRegulatingPoints(UUID networkUuid, int variantNum, ResourceType type) throws IOException {
+        Map<String, String> rawById = new HashMap<>();
+        for (Map.Entry<RegulatingOwnerInfo, RegulatingPointAttributes> entry : getRegulatingPoints(networkUuid, variantNum, type).entrySet()) {
+            rawById.put(entry.getKey().getEquipmentId(), mapper.writeValueAsString(entry.getValue()));
+        }
+        return rawById;
+    }
+
+    private Map<String, java.util.function.Consumer<IdentifiableAttributes>> curvePointAppliers(UUID networkUuid, int variantNum, ResourceType type) {
+        Map<String, java.util.function.Consumer<IdentifiableAttributes>> applierById = new HashMap<>();
+        Map<OwnerInfo, List<ReactiveCapabilityCurvePointAttributes>> curvePoints =
+                getReactiveCapabilityCurvePoints(networkUuid, variantNum, EQUIPMENT_TYPE_COLUMN, type.toString());
+        for (Map.Entry<OwnerInfo, List<ReactiveCapabilityCurvePointAttributes>> entry : curvePoints.entrySet()) {
+            List<ReactiveCapabilityCurvePointAttributes> points = entry.getValue();
+            applierById.put(entry.getKey().getEquipmentId(), attributes -> {
+                ReactiveLimitHolder holder = (ReactiveLimitHolder) attributes;
+                for (ReactiveCapabilityCurvePointAttributes point : points) {
+                    insertReactiveCapabilityCurvePointInEquipment(holder, point);
+                }
+            });
+        }
+        return applierById;
     }
 
     public List<Resource<SwitchAttributes>> getVoltageLevelSwitches(UUID networkUuid, int variantNum, String voltageLevelId) {

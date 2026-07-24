@@ -472,10 +472,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/generators", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get generators")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get generator list"))
-    public ResponseEntity<TopLevelDocument<GeneratorAttributes>> getGenerators(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getGenerators(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                                @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                                                                @Parameter(description = "Max number of generator to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getGenerators(networkId, variantNum), limit, ResourceType.GENERATOR);
+        return getAllStreamed(networkId, variantNum, mappings.getGeneratorMappings(), limit,
+            () -> repository.getGenerators(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/generators/{generatorId}", produces = APPLICATION_JSON_VALUE)
@@ -635,10 +636,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/batteries", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get batteries")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get batteries list"))
-    public ResponseEntity<TopLevelDocument<BatteryAttributes>> getBatteries(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getBatteries(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                             @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                                                             @Parameter(description = "Max number of batteries to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getBatteries(networkId, variantNum), limit, ResourceType.BATTERY);
+        return getAllStreamed(networkId, variantNum, mappings.getBatteryMappings(), limit,
+            () -> repository.getBatteries(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/batteries/{batteryId}", produces = APPLICATION_JSON_VALUE)
@@ -758,10 +760,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/shunt-compensators", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get shunt compensators")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get shunt compensator list"))
-    public ResponseEntity<TopLevelDocument<ShuntCompensatorAttributes>> getShuntCompensators(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getShuntCompensators(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                                              @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
             @Parameter(description = "Max number of shunt compensator to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getShuntCompensators(networkId, variantNum), limit, ResourceType.SHUNT_COMPENSATOR);
+        return getAllStreamed(networkId, variantNum, mappings.getShuntCompensatorMappings(), limit,
+            () -> repository.getShuntCompensators(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/shunt-compensators/{shuntCompensatorId}", produces = APPLICATION_JSON_VALUE)
@@ -820,10 +823,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/vsc-converter-stations", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get VSC converter stations")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get VSC converter stations list"))
-    public ResponseEntity<TopLevelDocument<VscConverterStationAttributes>> getVscConverterStations(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getVscConverterStations(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
             @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
             @Parameter(description = "Max number of VSC converter stations to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getVscConverterStations(networkId, variantNum), limit, ResourceType.VSC_CONVERTER_STATION);
+        return getAllStreamed(networkId, variantNum, mappings.getVscConverterStationMappings(), limit,
+            () -> repository.getVscConverterStations(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/vsc-converter-stations/{vscConverterStationId}", produces = APPLICATION_JSON_VALUE)
@@ -882,10 +886,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/lcc-converter-stations", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get LCC converter stations")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get LCC converter stations list"))
-    public ResponseEntity<TopLevelDocument<LccConverterStationAttributes>> getLccConverterStations(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getLccConverterStations(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
             @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
             @Parameter(description = "Max number of LCC converter stations to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getLccConverterStations(networkId, variantNum), limit, ResourceType.LCC_CONVERTER_STATION);
+        return getAllStreamed(networkId, variantNum, mappings.getLccConverterStationMappings(), limit,
+            () -> repository.getLccConverterStations(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/lcc-converter-stations/{lccConverterStationId}", produces = APPLICATION_JSON_VALUE)
@@ -944,10 +949,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/static-var-compensators", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get static var compensators")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get static var compensator list"))
-    public ResponseEntity<TopLevelDocument<StaticVarCompensatorAttributes>> getStaticVarCompensators(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getStaticVarCompensators(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
             @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
             @Parameter(description = "Max number of static var compensators to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getStaticVarCompensators(networkId, variantNum), limit, ResourceType.STATIC_VAR_COMPENSATOR);
+        return getAllStreamed(networkId, variantNum, mappings.getStaticVarCompensatorMappings(), limit,
+            () -> repository.getStaticVarCompensators(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/static-var-compensators/{staticVarCompensatorId}", produces = APPLICATION_JSON_VALUE)
