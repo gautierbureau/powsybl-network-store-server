@@ -215,9 +215,25 @@ public class IdentifiableCollectionJsonWriter {
     /**
      * Writes the complete {@code TopLevelDocument} for the rows of {@code resultSet}.
      *
+     * <p>{@code satelliteRawByField} carries per-request enrichment for fields whose
+     * value comes from a satellite table rather than a column: serialized field name to
+     * (equipment id to pre-serialized JSON value). Rows without an entry get the
+     * field's default, mirroring the materializing path. Field names must be
+     * serialized, non-column-backed properties of the attributes.
+     *
      * @return the number of rows written into {@code data}
      */
-    public int write(ResultSet resultSet, int variantNum, Integer limit, OutputStream out) throws IOException, SQLException {
+    public int write(ResultSet resultSet, int variantNum, Integer limit,
+                     Map<String, Map<String, String>> satelliteRawByField, OutputStream out) throws IOException, SQLException {
+        for (String fieldName : satelliteRawByField.keySet()) {
+            FieldWriter field = fieldWriters.stream().filter(w -> w.name().equals(fieldName)).findFirst()
+                    .orElseThrow(() -> new IllegalStateException("Satellite field " + fieldName
+                            + " is not a serialized property of table " + tableMapping.getTable()));
+            if (field.column() != null) {
+                throw new IllegalStateException("Satellite field " + fieldName + " of table "
+                        + tableMapping.getTable() + " is column-backed");
+            }
+        }
         int totalCount = 0;
         try (JsonGenerator generator = mapper.getFactory().createGenerator(out)) {
             generator.writeStartObject();
@@ -227,7 +243,7 @@ public class IdentifiableCollectionJsonWriter {
                 if (limit != null && totalCount > limit) {
                     continue; // keep consuming rows: totalCount mirrors the POJO path meta
                 }
-                writeResource(generator, resultSet, variantNum);
+                writeResource(generator, resultSet, variantNum, satelliteRawByField);
             }
             generator.writeEndArray();
             generator.writeObjectFieldStart("meta");
@@ -238,17 +254,26 @@ public class IdentifiableCollectionJsonWriter {
         return limit == null ? totalCount : Math.min(totalCount, limit);
     }
 
-    private void writeResource(JsonGenerator generator, ResultSet resultSet, int variantNum) throws IOException, SQLException {
+    private void writeResource(JsonGenerator generator, ResultSet resultSet, int variantNum,
+                               Map<String, Map<String, String>> satelliteRawByField) throws IOException, SQLException {
+        String id = resultSet.getString(1);
         generator.writeStartObject();
         generator.writeStringField("type", tableMapping.getResourceType().name());
-        generator.writeStringField("id", resultSet.getString(1));
+        generator.writeStringField("id", id);
         generator.writeNumberField("variantNum", variantNum);
         generator.writeObjectFieldStart("attributes");
         for (FieldWriter field : fieldWriters) {
             Column column = field.column();
             if (column == null) {
-                // not column-backed (e.g. extensionAttributes): always its default value
-                writeDefault(generator, field);
+                Map<String, String> satelliteRaw = satelliteRawByField.get(field.name());
+                String raw = satelliteRaw == null ? null : satelliteRaw.get(id);
+                if (raw != null) {
+                    generator.writeFieldName(field.name());
+                    generator.writeRawValue(raw);
+                } else {
+                    // not column-backed and no satellite value: the default
+                    writeDefault(generator, field);
+                }
                 continue;
             }
             switch (column.kind()) {
