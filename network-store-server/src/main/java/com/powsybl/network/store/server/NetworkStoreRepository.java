@@ -1733,6 +1733,9 @@ public class NetworkStoreRepository {
      * @return the number of resources written
      */
     public int streamIdentifiablesCollection(UUID networkUuid, int variantNum, TableMapping tableMapping, Integer limit, OutputStream out) throws IOException {
+        // satellite data (small: per-equipment enrichments) is materialized before the
+        // main-table cursor opens; the bulky main rows still stream
+        Map<String, Map<String, String>> satelliteRawByField = satelliteRawFields(networkUuid, variantNum, tableMapping);
         try (var connection = dataSource.getConnection()) {
             boolean previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
@@ -1741,7 +1744,7 @@ public class NetworkStoreRepository {
                 preparedStmt.setObject(1, networkUuid);
                 preparedStmt.setInt(2, variantNum);
                 try (ResultSet resultSet = preparedStmt.executeQuery()) {
-                    return collectionWriter(tableMapping).orElseThrow().write(resultSet, variantNum, limit, out);
+                    return collectionWriter(tableMapping).orElseThrow().write(resultSet, variantNum, limit, satelliteRawByField, out);
                 }
             } finally {
                 connection.commit();
@@ -1750,6 +1753,24 @@ public class NetworkStoreRepository {
         } catch (SQLException e) {
             throw new UncheckedSqlException(e);
         }
+    }
+
+    /**
+     * Pre-serialized satellite-table enrichment for the streamed collection read of
+     * {@code tableMapping}: field name to (equipment id to raw JSON). The values are
+     * produced by serializing exactly the objects the materializing path would set,
+     * with the same mapper, so both paths emit identical bytes.
+     */
+    private Map<String, Map<String, String>> satelliteRawFields(UUID networkUuid, int variantNum, TableMapping tableMapping) throws IOException {
+        ResourceType type = tableMapping.getResourceType();
+        if (type != ResourceType.LOAD && type != ResourceType.LINE && type != ResourceType.BUSBAR_SECTION) {
+            return Map.of();
+        }
+        Map<String, String> rawById = new HashMap<>();
+        for (Map.Entry<OwnerInfo, Set<RegulatingEquipmentIdentifier>> entry : getRegulatingEquipments(networkUuid, variantNum, type).entrySet()) {
+            rawById.put(entry.getKey().getEquipmentId(), mapper.writeValueAsString(entry.getValue()));
+        }
+        return Map.of("regulatingEquipments", rawById);
     }
 
     public List<Resource<SwitchAttributes>> getVoltageLevelSwitches(UUID networkUuid, int variantNum, String voltageLevelId) {

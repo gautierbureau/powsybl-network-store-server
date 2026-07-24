@@ -696,10 +696,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/loads", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get loads")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get load list"))
-    public ResponseEntity<TopLevelDocument<LoadAttributes>> getLoads(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getLoads(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                      @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                                                      @Parameter(description = "Max number of load to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getLoads(networkId, variantNum), limit, ResourceType.LOAD);
+        return getAllStreamed(networkId, variantNum, mappings.getLoadMappings(), limit,
+            () -> repository.getLoads(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/loads/{loadId}", produces = APPLICATION_JSON_VALUE)
@@ -1004,10 +1005,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/busbar-sections", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get busbar sections")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get busbar section list"))
-    public ResponseEntity<TopLevelDocument<BusbarSectionAttributes>> getBusbarSections(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getBusbarSections(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                                        @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                                                                        @Parameter(description = "Max number of busbar section to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getBusbarSections(networkId, variantNum), limit, ResourceType.BUSBAR_SECTION);
+        return getAllStreamed(networkId, variantNum, mappings.getBusbarSectionMappings(), limit,
+            () -> repository.getBusbarSections(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/busbar-sections/{busbarSectionId}", produces = APPLICATION_JSON_VALUE)
@@ -1264,10 +1266,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/lines", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get lines")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get line list"))
-    public ResponseEntity<TopLevelDocument<LineAttributes>> getLines(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getLines(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                      @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                                                      @Parameter(description = "Max number of line to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getLines(networkId, variantNum), limit, ResourceType.LINE);
+        return getAllStreamed(networkId, variantNum, mappings.getLineMappings(), limit,
+            () -> repository.getLines(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/lines/{lineId}", produces = APPLICATION_JSON_VALUE)
