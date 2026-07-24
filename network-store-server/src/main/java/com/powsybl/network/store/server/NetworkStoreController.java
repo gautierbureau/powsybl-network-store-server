@@ -585,10 +585,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/areas", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get areas")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get area list"))
-    public ResponseEntity<TopLevelDocument<AreaAttributes>> getAreas(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getAreas(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                            @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                                                            @Parameter(description = "Max number of areas to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getAreas(networkId, variantNum), limit, ResourceType.AREA);
+        return getAllStreamed(networkId, variantNum, mappings.getAreaMappings(), limit,
+            () -> repository.getAreas(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/areas/{areaId}", produces = APPLICATION_JSON_VALUE)
@@ -1146,11 +1147,12 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/2-windings-transformers", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get 2 windings transformers")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get 2 windings transformer list"))
-    public ResponseEntity<TopLevelDocument<TwoWindingsTransformerAttributes>> getTwoWindingsTransformers(
+    public ResponseEntity<StreamingResponseBody> getTwoWindingsTransformers(
             @Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
             @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
             @Parameter(description = "Max number of 2 windings transformer to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getTwoWindingsTransformers(networkId, variantNum), limit, ResourceType.TWO_WINDINGS_TRANSFORMER);
+        return getAllStreamed(networkId, variantNum, mappings.getTwoWindingsTransformerMappings(), limit,
+            () -> repository.getTwoWindingsTransformers(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/2-windings-transformers/{twoWindingsTransformerId}", produces = APPLICATION_JSON_VALUE)
@@ -1387,10 +1389,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/boundary-lines", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get boundary lines")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get boundary line list"))
-    public ResponseEntity<TopLevelDocument<BoundaryLineAttributes>> getBoundaryLines(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getBoundaryLines(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                                      @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                                                                      @Parameter(description = "Max number of boundary line to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getBoundaryLines(networkId, variantNum), limit, ResourceType.BOUNDARY_LINE);
+        return getAllStreamed(networkId, variantNum, mappings.getBoundaryLineMappings(), limit,
+            () -> repository.getBoundaryLines(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/boundary-lines/{boundaryLineId}", produces = APPLICATION_JSON_VALUE)

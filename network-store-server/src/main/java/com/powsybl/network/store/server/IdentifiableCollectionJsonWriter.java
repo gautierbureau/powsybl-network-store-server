@@ -53,21 +53,14 @@ public class IdentifiableCollectionJsonWriter {
     }
 
     /**
-     * Per-request satellite-table enrichment of one serialized field.
-     * Either raw pass-through values for a simple field ({@code rawById}, with
-     * {@code omitOnMiss} telling whether a row without an entry omits the field —
-     * matching setters that assign null on miss — or keeps its default), or
-     * {@code applierById} mutators applied to the scratch instance of a composite
-     * field before it is serialized (e.g. reactive capability curve points).
+     * Per-request raw satellite enrichment of one simple serialized field:
+     * pre-serialized values by equipment id, with {@code omitOnMiss} telling whether
+     * a row without an entry omits the field — matching materializing setters that
+     * assign null on miss — or keeps its default.
      */
-    public record SatelliteField(Map<String, String> rawById, boolean omitOnMiss,
-                                 Map<String, Consumer<IdentifiableAttributes>> applierById) {
+    public record SatelliteField(Map<String, String> rawById, boolean omitOnMiss) {
         public static SatelliteField raw(Map<String, String> rawById, boolean omitOnMiss) {
-            return new SatelliteField(rawById, omitOnMiss, null);
-        }
-
-        public static SatelliteField appliers(Map<String, Consumer<IdentifiableAttributes>> applierById) {
-            return new SatelliteField(null, false, applierById);
+            return new SatelliteField(rawById, omitOnMiss);
         }
     }
 
@@ -75,11 +68,19 @@ public class IdentifiableCollectionJsonWriter {
      * One serialized attribute field, in serializer order. Simple fields are backed by
      * at most one column ({@code column}, null for non-column fields) and fall back to
      * {@code defaultRaw} (null = omitted). Composite fields ({@code members} non-null)
-     * are rebuilt per row via their columns' setters and written by {@code property}.
+     * are rebuilt per row via their columns' setters. {@code property} is the bean
+     * serializer's writer for this field, used whenever the field is emitted from the
+     * shared scratch instance (composite members or applier-affected fields).
      */
     private record FieldWriter(String name, SerializedString encodedName, Column column, char[] defaultRaw,
                                List<Column> members, BeanPropertyWriter property) {
     }
+
+    private boolean anyComposite;
+    // single-column fields whose raw copy would not be byte-identical to the
+    // materializing round trip (Set-typed columns: deserialization re-orders the
+    // elements), so they are re-normalized through the scratch instance instead
+    private final java.util.Set<String> normalizedFields = new java.util.HashSet<>();
 
     // columns whose sentinel cannot be probed (interface-typed variant columns);
     // resolution is by construction of the write-side mapping lambdas
@@ -136,16 +137,26 @@ public class IdentifiableCollectionJsonWriter {
             throw new java.io.UncheckedIOException(e);
         }
         SerializedString encodedName = new SerializedString(name);
+        BeanPropertyWriter beanProperty = property instanceof BeanPropertyWriter b ? b : null;
         List<Column> columns = columnsByProperty.get(name);
         if (columns != null && columns.size() > 1) {
             // several columns build one object through stateful setters: rebuilt per row
-            if (!(property instanceof BeanPropertyWriter beanProperty)) {
+            if (beanProperty == null) {
                 throw new IllegalStateException("Composite property " + name + " of table "
                         + tableMapping.getTable() + " has no bean property writer");
             }
+            anyComposite = true;
             return new FieldWriter(name, encodedName, null, defaultRaw, columns, beanProperty);
         }
-        return new FieldWriter(name, encodedName, columns == null ? null : columns.get(0), defaultRaw, null, null);
+        if (columns != null && columns.get(0).mapping().getClassR() != null
+                && java.util.Set.class.isAssignableFrom(columns.get(0).mapping().getClassR())) {
+            if (beanProperty == null) {
+                throw new IllegalStateException("Set-typed property " + name + " of table "
+                        + tableMapping.getTable() + " has no bean property writer");
+            }
+            normalizedFields.add(name);
+        }
+        return new FieldWriter(name, encodedName, columns == null ? null : columns.get(0), defaultRaw, null, beanProperty);
     }
 
     @SuppressWarnings("unchecked")
@@ -255,27 +266,40 @@ public class IdentifiableCollectionJsonWriter {
     }
 
     /**
-     * Writes the complete {@code TopLevelDocument} for the rows of {@code resultSet};
-     * see {@link SatelliteField} for the per-request enrichment contract.
+     * Writes the complete {@code TopLevelDocument} for the rows of {@code resultSet}.
+     *
+     * <p>{@code rawByField} carries pre-serialized per-field satellite values (see
+     * {@link SatelliteField}). {@code applierById} carries per-equipment mutators run
+     * once per row on a shared scratch attributes instance — after its composite
+     * member columns are bound, before its fields are serialized — reusing the very
+     * same injection code as the materializing path (curve points, tap changer steps,
+     * limits groups, tap changer regulating points). {@code applierAffectedFields}
+     * lists the non-composite fields appliers may touch, so they are emitted from the
+     * scratch instance instead of their column/default.
      *
      * @return the number of rows written into {@code data}
      */
     public int write(ResultSet resultSet, int variantNum, Integer limit,
-                     Map<String, SatelliteField> satelliteByField, OutputStream out) throws IOException, SQLException {
-        for (Map.Entry<String, SatelliteField> e : satelliteByField.entrySet()) {
-            FieldWriter field = fieldWriters.stream().filter(w -> w.name().equals(e.getKey())).findFirst()
-                    .orElseThrow(() -> new IllegalStateException("Satellite field " + e.getKey()
-                            + " is not a serialized property of table " + tableMapping.getTable()));
-            boolean composite = field.members() != null;
-            if (composite && e.getValue().applierById() == null || !composite && e.getValue().rawById() == null) {
-                throw new IllegalStateException("Satellite field " + e.getKey() + " of table "
-                        + tableMapping.getTable() + " has the wrong enrichment kind");
-            }
-            if (!composite && field.column() != null) {
-                throw new IllegalStateException("Satellite field " + e.getKey() + " of table "
-                        + tableMapping.getTable() + " is column-backed");
+                     Map<String, SatelliteField> rawByField,
+                     Map<String, Consumer<IdentifiableAttributes>> applierById,
+                     java.util.Set<String> applierAffectedFields,
+                     OutputStream out) throws IOException, SQLException {
+        for (String name : rawByField.keySet()) {
+            FieldWriter field = fieldWriter(name);
+            if (field.members() != null || field.column() != null || applierAffectedFields.contains(name)) {
+                throw new IllegalStateException("Raw satellite field " + name + " of table "
+                        + tableMapping.getTable() + " must be a simple non-column field");
             }
         }
+        for (String name : applierAffectedFields) {
+            if (fieldWriter(name).property() == null) {
+                throw new IllegalStateException("Applier-affected field " + name + " of table "
+                        + tableMapping.getTable() + " has no bean property writer");
+            }
+        }
+        java.util.Set<String> scratchFields = new java.util.HashSet<>(normalizedFields);
+        scratchFields.addAll(applierAffectedFields);
+        boolean useScratch = anyComposite || !applierById.isEmpty() || !scratchFields.isEmpty();
         SerializerProvider provider = mapper.getSerializerProviderInstance();
         int totalCount = 0;
         try (JsonGenerator generator = mapper.getFactory().createGenerator(out)) {
@@ -286,7 +310,7 @@ public class IdentifiableCollectionJsonWriter {
                 if (limit != null && totalCount > limit) {
                     continue; // keep consuming rows: totalCount mirrors the POJO path meta
                 }
-                writeResource(generator, resultSet, variantNum, satelliteByField, provider);
+                writeResource(generator, resultSet, variantNum, rawByField, applierById, scratchFields, useScratch, provider);
             }
             generator.writeEndArray();
             generator.writeObjectFieldStart("meta");
@@ -297,22 +321,51 @@ public class IdentifiableCollectionJsonWriter {
         return limit == null ? totalCount : Math.min(totalCount, limit);
     }
 
+    private FieldWriter fieldWriter(String name) {
+        return fieldWriters.stream().filter(w -> w.name().equals(name)).findFirst()
+                .orElseThrow(() -> new IllegalStateException("Field " + name
+                        + " is not a serialized property of table " + tableMapping.getTable()));
+    }
+
     private void writeResource(JsonGenerator generator, ResultSet resultSet, int variantNum,
-                               Map<String, SatelliteField> satelliteByField, SerializerProvider provider) throws IOException, SQLException {
+                               Map<String, SatelliteField> rawByField,
+                               Map<String, Consumer<IdentifiableAttributes>> applierById,
+                               java.util.Set<String> scratchFields,
+                               boolean useScratch, SerializerProvider provider) throws IOException, SQLException {
         String id = resultSet.getString(1);
+        // one scratch per row, shared by every composite and applier-affected field:
+        // bind all composite member columns through their own setters, then run the
+        // row's applier — the same order as the materializing path (bind, then inject)
+        IdentifiableAttributes scratch = null;
+        if (useScratch) {
+            scratch = tableMapping.getAttributesSupplier().get();
+            for (FieldWriter field : fieldWriters) {
+                if (field.members() != null) {
+                    for (Column member : field.members()) {
+                        bindAttributes(resultSet, member.sqlIndex(), member.mapping(), scratch, mapper);
+                    }
+                } else if (field.column() != null && scratchFields.contains(field.name())) {
+                    bindAttributes(resultSet, field.column().sqlIndex(), field.column().mapping(), scratch, mapper);
+                }
+            }
+            Consumer<IdentifiableAttributes> applier = applierById.get(id);
+            if (applier != null) {
+                applier.accept(scratch);
+            }
+        }
         generator.writeStartObject();
         generator.writeStringField("type", tableMapping.getResourceType().name());
         generator.writeStringField("id", id);
         generator.writeNumberField("variantNum", variantNum);
         generator.writeObjectFieldStart("attributes");
         for (FieldWriter field : fieldWriters) {
-            if (field.members() != null) {
-                writeComposite(generator, resultSet, field, satelliteByField.get(field.name()), id, provider);
+            if (field.members() != null || scratchFields.contains(field.name())) {
+                serializeFromScratch(generator, field, scratch, provider);
                 continue;
             }
             Column column = field.column();
             if (column == null) {
-                SatelliteField satellite = satelliteByField.get(field.name());
+                SatelliteField satellite = rawByField.get(field.name());
                 String raw = satellite == null ? null : satellite.rawById().get(id);
                 if (raw != null) {
                     generator.writeFieldName(field.encodedName());
@@ -375,28 +428,17 @@ public class IdentifiableCollectionJsonWriter {
     }
 
     /**
-     * Rebuilds a composite property exactly like the POJO path: fresh attributes,
-     * the member columns' own setters in mapping order (null columns skipped, as in
-     * {@code bindAttributes}), then the satellite applier, then the bean serializer's
-     * property writer — which also enforces the same NON_NULL omission.
+     * Emits one field from the shared scratch instance with the bean serializer's own
+     * property writer — which also enforces the same NON_NULL omission as the
+     * materializing path.
      */
-    private void writeComposite(JsonGenerator generator, ResultSet resultSet, FieldWriter field,
-                                SatelliteField satellite, String id, SerializerProvider provider) throws SQLException {
-        IdentifiableAttributes scratch = tableMapping.getAttributesSupplier().get();
-        for (Column member : field.members()) {
-            bindAttributes(resultSet, member.sqlIndex(), member.mapping(), scratch, mapper);
-        }
-        if (satellite != null) {
-            Consumer<IdentifiableAttributes> applier = satellite.applierById().get(id);
-            if (applier != null) {
-                applier.accept(scratch);
-            }
-        }
+    private void serializeFromScratch(JsonGenerator generator, FieldWriter field,
+                                      IdentifiableAttributes scratch, SerializerProvider provider) {
         try {
             field.property().serializeAsField(scratch, generator, provider);
         } catch (Exception e) {
-            throw new IllegalStateException("Cannot serialize composite property " + field.name()
-                    + " of table " + tableMapping.getTable(), e);
+            throw new IllegalStateException("Cannot serialize property " + field.name()
+                    + " of table " + tableMapping.getTable() + " from scratch instance", e);
         }
     }
 

@@ -1735,7 +1735,7 @@ public class NetworkStoreRepository {
     public int streamIdentifiablesCollection(UUID networkUuid, int variantNum, TableMapping tableMapping, Integer limit, OutputStream out) throws IOException {
         // satellite data (small: per-equipment enrichments) is materialized before the
         // main-table cursor opens; the bulky main rows still stream
-        Map<String, IdentifiableCollectionJsonWriter.SatelliteField> satelliteByField = satelliteFields(networkUuid, variantNum, tableMapping);
+        StreamEnrichment enrichment = streamEnrichment(networkUuid, variantNum, tableMapping);
         try (var connection = dataSource.getConnection()) {
             boolean previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
@@ -1744,7 +1744,8 @@ public class NetworkStoreRepository {
                 preparedStmt.setObject(1, networkUuid);
                 preparedStmt.setInt(2, variantNum);
                 try (ResultSet resultSet = preparedStmt.executeQuery()) {
-                    return collectionWriter(tableMapping).orElseThrow().write(resultSet, variantNum, limit, satelliteByField, out);
+                    return collectionWriter(tableMapping).orElseThrow().write(resultSet, variantNum, limit,
+                            enrichment.rawFields(), enrichment.applierById(), enrichment.applierAffectedFields(), out);
                 }
             } finally {
                 connection.commit();
@@ -1756,43 +1757,62 @@ public class NetworkStoreRepository {
     }
 
     /**
-     * Satellite-table enrichment for the streamed collection read of
-     * {@code tableMapping} (see {@link IdentifiableCollectionJsonWriter.SatelliteField}).
-     * Raw values are produced by serializing exactly the objects the materializing
-     * path would set, with the same mapper; composite appliers reuse the very same
-     * injection code — so both paths emit identical bytes. The miss behavior mirrors
-     * each materializing setter: getOrDefault-style setters keep the field's default,
-     * plain map lookups null the field out (omitted under NON_NULL).
+     * Enrichment of a streamed collection read (see
+     * {@link IdentifiableCollectionJsonWriter#write}): pre-serialized raw satellite
+     * fields, per-equipment scratch appliers reusing the materializing path's
+     * injection code, and the non-composite fields those appliers may touch. Raw
+     * values are produced by serializing exactly the objects the materializing path
+     * would set, with the same mapper — so both paths emit identical bytes. The miss
+     * behavior mirrors each materializing setter: getOrDefault-style setters keep the
+     * field's default, plain map lookups null the field out (omitted under NON_NULL).
      */
-    private Map<String, IdentifiableCollectionJsonWriter.SatelliteField> satelliteFields(UUID networkUuid, int variantNum, TableMapping tableMapping) throws IOException {
+    record StreamEnrichment(Map<String, IdentifiableCollectionJsonWriter.SatelliteField> rawFields,
+                            Map<String, java.util.function.Consumer<IdentifiableAttributes>> applierById,
+                            Set<String> applierAffectedFields) {
+        static final StreamEnrichment NONE = new StreamEnrichment(Map.of(), Map.of(), Set.of());
+    }
+
+    private StreamEnrichment streamEnrichment(UUID networkUuid, int variantNum, TableMapping tableMapping) throws IOException {
         ResourceType type = tableMapping.getResourceType();
-        Map<String, IdentifiableCollectionJsonWriter.SatelliteField> fields = new HashMap<>();
+        Map<String, IdentifiableCollectionJsonWriter.SatelliteField> rawFields = new HashMap<>();
         switch (type) {
             case LOAD, LINE, BUSBAR_SECTION ->
-                fields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), false));
+                rawFields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), false));
             case BATTERY -> {
-                fields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), false));
-                fields.put(REACTIVE_LIMITS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.appliers(curvePointAppliers(networkUuid, variantNum, type)));
+                rawFields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), false));
+                return new StreamEnrichment(rawFields, curvePointAppliers(networkUuid, variantNum, type), Set.of());
             }
             case SHUNT_COMPENSATOR, STATIC_VAR_COMPENSATOR -> {
-                fields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), true));
-                fields.put(REGULATING_POINT_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingPoints(networkUuid, variantNum, type), true));
+                rawFields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), true));
+                rawFields.put(REGULATING_POINT_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingPoints(networkUuid, variantNum, type), true));
             }
             case GENERATOR, VSC_CONVERTER_STATION -> {
-                fields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), true));
-                fields.put(REGULATING_POINT_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingPoints(networkUuid, variantNum, type), true));
-                fields.put(REACTIVE_LIMITS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.appliers(curvePointAppliers(networkUuid, variantNum, type)));
+                rawFields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), true));
+                rawFields.put(REGULATING_POINT_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingPoints(networkUuid, variantNum, type), true));
+                return new StreamEnrichment(rawFields, curvePointAppliers(networkUuid, variantNum, type), Set.of());
             }
+            case TWO_WINDINGS_TRANSFORMER -> {
+                rawFields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), true));
+                return new StreamEnrichment(rawFields, twoWindingsTransformerAppliers(networkUuid, variantNum), Set.of());
+            }
+            case BOUNDARY_LINE -> {
+                rawFields.put(REGULATING_EQUIPMENTS_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawRegulatingEquipments(networkUuid, variantNum, type), false));
+                return new StreamEnrichment(rawFields, boundaryLineLimitsAppliers(networkUuid, variantNum), Set.of(OPERATIONAL_LIMITS_GROUPS_FIELD));
+            }
+            case AREA ->
+                rawFields.put(AREA_BOUNDARIES_FIELD, IdentifiableCollectionJsonWriter.SatelliteField.raw(rawAreaBoundaries(networkUuid, variantNum), false));
             default -> {
                 // satellite-free table
             }
         }
-        return fields;
+        return new StreamEnrichment(rawFields, Map.of(), Set.of());
     }
 
     private static final String REGULATING_EQUIPMENTS_FIELD = "regulatingEquipments";
     private static final String REGULATING_POINT_FIELD = "regulatingPoint";
     private static final String REACTIVE_LIMITS_FIELD = "reactiveLimits";
+    private static final String OPERATIONAL_LIMITS_GROUPS_FIELD = "operationalLimitsGroups";
+    private static final String AREA_BOUNDARIES_FIELD = "areaBoundaries";
 
     private Map<String, String> rawRegulatingEquipments(UUID networkUuid, int variantNum, ResourceType type) throws IOException {
         Map<String, String> rawById = new HashMap<>();
@@ -1805,6 +1825,14 @@ public class NetworkStoreRepository {
     private Map<String, String> rawRegulatingPoints(UUID networkUuid, int variantNum, ResourceType type) throws IOException {
         Map<String, String> rawById = new HashMap<>();
         for (Map.Entry<RegulatingOwnerInfo, RegulatingPointAttributes> entry : getRegulatingPoints(networkUuid, variantNum, type).entrySet()) {
+            rawById.put(entry.getKey().getEquipmentId(), mapper.writeValueAsString(entry.getValue()));
+        }
+        return rawById;
+    }
+
+    private Map<String, String> rawAreaBoundaries(UUID networkUuid, int variantNum) throws IOException {
+        Map<String, String> rawById = new HashMap<>();
+        for (Map.Entry<OwnerInfo, List<AreaBoundaryAttributes>> entry : getAreaBoundaries(networkUuid, variantNum, null, null).entrySet()) {
             rawById.put(entry.getKey().getEquipmentId(), mapper.writeValueAsString(entry.getValue()));
         }
         return rawById;
@@ -1824,6 +1852,54 @@ public class NetworkStoreRepository {
             });
         }
         return applierById;
+    }
+
+    /**
+     * Per-transformer appliers merging the tap changer steps and the tap changer
+     * regulating points into the scratch instance, from maps prefetched once —
+     * through the same methods the materializing path uses.
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, java.util.function.Consumer<IdentifiableAttributes>> twoWindingsTransformerAppliers(UUID networkUuid, int variantNum) {
+        Map<OwnerInfo, List<TapChangerStepAttributes>> tapChangerSteps =
+                getTapChangerSteps(networkUuid, variantNum, EQUIPMENT_TYPE_COLUMN, ResourceType.TWO_WINDINGS_TRANSFORMER.toString());
+        Map<RegulatingOwnerInfo, RegulatingPointAttributes> regulatingPoints =
+                getRegulatingPoints(networkUuid, variantNum, ResourceType.TWO_WINDINGS_TRANSFORMER);
+        Map<String, java.util.function.Consumer<IdentifiableAttributes>> applierById = new HashMap<>();
+        java.util.function.BiConsumer<String, IdentifiableAttributes> apply = (id, attributes) -> {
+            TwoWindingsTransformerAttributes twt = (TwoWindingsTransformerAttributes) attributes;
+            Resource<TwoWindingsTransformerAttributes> wrapper = (Resource<TwoWindingsTransformerAttributes>)
+                    tableMappingWrapper(mappings.getTwoWindingsTransformerMappings(), id, variantNum, attributes);
+            insertTapChangerStepsInEquipments(networkUuid, List.of(wrapper), tapChangerSteps);
+            setRegulatingPointForTapChanger(twt.getRatioTapChangerAttributes(), twt.getPhaseTapChangerAttributes(),
+                    RegulatingTapChangerType.RATIO_TAP_CHANGER, RegulatingTapChangerType.PHASE_TAP_CHANGER,
+                    regulatingPoints, id, ResourceType.TWO_WINDINGS_TRANSFORMER, networkUuid, variantNum);
+        };
+        tapChangerSteps.keySet().forEach(owner -> applierById.put(owner.getEquipmentId(), attrs -> apply.accept(owner.getEquipmentId(), attrs)));
+        regulatingPoints.keySet().forEach(owner -> applierById.computeIfAbsent(owner.getEquipmentId(),
+            id -> attrs -> apply.accept(id, attrs)));
+        return applierById;
+    }
+
+    private Map<String, java.util.function.Consumer<IdentifiableAttributes>> boundaryLineLimitsAppliers(UUID networkUuid, int variantNum) {
+        Map<OwnerInfo, Map<Integer, Map<String, OperationalLimitsGroupAttributes>>> operationalLimitsGroups =
+                limitsHandler.getOperationalLimitsGroupsAttributes(networkUuid, variantNum, EQUIPMENT_TYPE_COLUMN, ResourceType.BOUNDARY_LINE.toString());
+        Map<String, java.util.function.Consumer<IdentifiableAttributes>> applierById = new HashMap<>();
+        for (OwnerInfo owner : operationalLimitsGroups.keySet()) {
+            applierById.put(owner.getEquipmentId(), attributes -> {
+                @SuppressWarnings("unchecked")
+                Resource<BoundaryLineAttributes> wrapper = (Resource<BoundaryLineAttributes>)
+                        tableMappingWrapper(mappings.getBoundaryLineMappings(), owner.getEquipmentId(), variantNum, attributes);
+                limitsHandler.insertOperationalLimitsGroupsInEquipments(networkUuid, List.of(wrapper), operationalLimitsGroups);
+            });
+        }
+        return applierById;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Resource<? extends IdentifiableAttributes> tableMappingWrapper(TableMapping tableMapping, String id, int variantNum, IdentifiableAttributes attributes) {
+        Resource.Builder<IdentifiableAttributes> builder = (Resource.Builder<IdentifiableAttributes>) tableMapping.getResourceBuilderSupplier().get();
+        return builder.id(id).variantNum(variantNum).attributes(attributes).build();
     }
 
     public List<Resource<SwitchAttributes>> getVoltageLevelSwitches(UUID networkUuid, int variantNum, String voltageLevelId) {
