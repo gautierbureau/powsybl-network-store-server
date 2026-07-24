@@ -37,6 +37,8 @@ import org.springframework.stereotype.Repository;
 import org.springframework.util.CollectionUtils;
 
 import javax.sql.DataSource;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -1685,6 +1687,69 @@ public class NetworkStoreRepository {
 
     public List<Resource<SwitchAttributes>> getSwitches(UUID networkUuid, int variantNum) {
         return getIdentifiables(networkUuid, variantNum, mappings.getSwitchMappings());
+    }
+
+    /**
+     * True when the whole-collection read of {@code tableMapping} can be streamed
+     * straight from the database: the variant is full (no partial-variant overlay to
+     * resolve in memory) and every column type is streamable.
+     */
+    public boolean canStreamCollection(UUID networkUuid, int variantNum, TableMapping tableMapping) {
+        if (collectionWriter(tableMapping).isEmpty()) {
+            return false;
+        }
+        try (var connection = dataSource.getConnection()) {
+            return NetworkAttributes.isFullVariant(
+                    getNetworkAttributes(connection, networkUuid, variantNum, mappings, mapper).getFullVariantNum());
+        } catch (SQLException e) {
+            throw new UncheckedSqlException(e);
+        }
+    }
+
+    // writer construction probes the table's column-to-property resolution once; a table
+    // it cannot handle is cached as empty and its endpoint stays on the POJO path
+    private final Map<String, Optional<IdentifiableCollectionJsonWriter>> collectionWriters = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private Optional<IdentifiableCollectionJsonWriter> collectionWriter(TableMapping tableMapping) {
+        return collectionWriters.computeIfAbsent(tableMapping.getTable(), table -> {
+            if (!IdentifiableCollectionJsonWriter.supports(tableMapping)) {
+                return Optional.empty();
+            }
+            try {
+                return Optional.of(new IdentifiableCollectionJsonWriter(mapper, tableMapping));
+            } catch (IllegalStateException | ClassCastException e) {
+                LOGGER.warn("Collection streaming disabled for table {}: {}", tableMapping.getTable(), e.getMessage());
+                return Optional.empty();
+            }
+        });
+    }
+
+    /**
+     * Streams the full-variant collection response of {@code tableMapping} directly
+     * from the database into {@code out} (see {@link IdentifiableCollectionJsonWriter}).
+     * Auto-commit is disabled for the duration of the query so the JDBC driver
+     * cursors through the result set instead of materializing it.
+     *
+     * @return the number of resources written
+     */
+    public int streamIdentifiablesCollection(UUID networkUuid, int variantNum, TableMapping tableMapping, Integer limit, OutputStream out) throws IOException {
+        try (var connection = dataSource.getConnection()) {
+            boolean previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try (var preparedStmt = connection.prepareStatement(QueryCatalog.buildGetIdentifiablesQuery(tableMapping.getTable(), tableMapping.getColumnsMapping().keySet()))) {
+                preparedStmt.setFetchSize(BATCH_SIZE);
+                preparedStmt.setObject(1, networkUuid);
+                preparedStmt.setInt(2, variantNum);
+                try (ResultSet resultSet = preparedStmt.executeQuery()) {
+                    return collectionWriter(tableMapping).orElseThrow().write(resultSet, variantNum, limit, out);
+                }
+            } finally {
+                connection.commit();
+                connection.setAutoCommit(previousAutoCommit);
+            }
+        } catch (SQLException e) {
+            throw new UncheckedSqlException(e);
+        }
     }
 
     public List<Resource<SwitchAttributes>> getVoltageLevelSwitches(UUID networkUuid, int variantNum, String voltageLevelId) {

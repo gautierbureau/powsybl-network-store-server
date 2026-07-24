@@ -6,6 +6,7 @@
  */
 package com.powsybl.network.store.server;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.powsybl.network.store.model.*;
 import com.powsybl.network.store.model.svattributes.*;
 import io.swagger.v3.oas.annotations.Operation;
@@ -18,6 +19,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import java.util.*;
 import java.util.function.Consumer;
@@ -39,6 +41,12 @@ public class NetworkStoreController {
 
     @Autowired
     private NetworkStoreObserver networkStoreObserver;
+
+    @Autowired
+    private Mappings mappings;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     private <T extends IdentifiableAttributes> ResponseEntity<TopLevelDocument<T>> get(Supplier<Optional<Resource<T>>> f) {
         Optional<Resource<T>> optResource = networkStoreObserver.observeOne("get", f::get);
@@ -198,10 +206,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/substations", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get substations")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get substation list"))
-    public ResponseEntity<TopLevelDocument<SubstationAttributes>> getSubstations(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getSubstations(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                                  @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                                                                  @Parameter(description = "Max number of substation to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getSubstations(networkId, variantNum), limit, ResourceType.SUBSTATION);
+        return getAllStreamed(networkId, variantNum, mappings.getSubstationMappings(), limit,
+            () -> repository.getSubstations(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/substations/{substationId}", produces = APPLICATION_JSON_VALUE)
@@ -250,10 +259,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/voltage-levels", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get voltage levels")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get voltage level list"))
-    public ResponseEntity<TopLevelDocument<VoltageLevelAttributes>> getVoltageLevels(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getVoltageLevels(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                                      @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                                                                      @Parameter(description = "Max number of voltage level to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getVoltageLevels(networkId, variantNum), limit, ResourceType.VOLTAGE_LEVEL);
+        return getAllStreamed(networkId, variantNum, mappings.getVoltageLevelMappings(), limit,
+            () -> repository.getVoltageLevels(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/voltage-levels/{voltageLevelId}", produces = APPLICATION_JSON_VALUE)
@@ -522,10 +532,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/tie-lines", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get tie lines")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get tie line list"))
-    public ResponseEntity<TopLevelDocument<TieLineAttributes>> getTieLines(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getTieLines(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                            @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                                                            @Parameter(description = "Max number of tie lines to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getTieLines(networkId, variantNum), limit, ResourceType.TIE_LINE);
+        return getAllStreamed(networkId, variantNum, mappings.getTieLineMappings(), limit,
+            () -> repository.getTieLines(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/tie-lines/{tieLineId}", produces = APPLICATION_JSON_VALUE)
@@ -1045,10 +1056,39 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/switches", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get switches")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get switch list"))
-    public ResponseEntity<TopLevelDocument<SwitchAttributes>> getSwitches(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
-                                                                          @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
-                                                                          @Parameter(description = "Max number of switch to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getSwitches(networkId, variantNum), limit, ResourceType.SWITCH);
+    public ResponseEntity<StreamingResponseBody> getSwitches(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+                                                             @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
+                                                             @Parameter(description = "Max number of switch to get") @RequestParam(required = false) Integer limit) {
+        return getAllStreamed(networkId, variantNum, mappings.getSwitchMappings(), limit,
+            () -> repository.getSwitches(networkId, variantNum));
+    }
+
+    /**
+     * Serves a whole-collection read. Full-variant networks are streamed directly from
+     * the database (no attribute POJOs, no in-memory response document — constant
+     * per-request memory); partial variants, whose overlay resolution needs the
+     * in-memory collections, fall back to the materializing path serialized with the
+     * same mapper, so both branches produce the same bytes.
+     */
+    private <T extends IdentifiableAttributes> ResponseEntity<StreamingResponseBody> getAllStreamed(
+            UUID networkId, int variantNum, TableMapping tableMapping, Integer limit,
+            Supplier<List<Resource<T>>> materializingFallback) {
+        ResourceType resourceType = tableMapping.getResourceType();
+        if (repository.canStreamCollection(networkId, variantNum, tableMapping)) {
+            return ResponseEntity.ok()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(out -> {
+                        int count = repository.streamIdentifiablesCollection(networkId, variantNum, tableMapping, limit, out);
+                        // count recorded for observability; the fetch+serialization time of the
+                        // streamed path is not comparable to the fetch-only time observed on the
+                        // materializing path, so it is deliberately not measured here
+                        networkStoreObserver.observe("get.all", resourceType, count, () -> { });
+                    });
+        }
+        ResponseEntity<TopLevelDocument<T>> document = getAll(materializingFallback, limit, resourceType);
+        return ResponseEntity.status(document.getStatusCode())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(out -> objectMapper.writeValue(out, document.getBody()));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/switches/{switchId}", produces = APPLICATION_JSON_VALUE)
@@ -1285,10 +1325,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/hvdc-lines", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get hvdc lines")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get hvdc line list"))
-    public ResponseEntity<TopLevelDocument<HvdcLineAttributes>> getHvdcLines(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getHvdcLines(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                              @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                                                              @Parameter(description = "Max number of hvdc line to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getHvdcLines(networkId, variantNum), limit, ResourceType.HVDC_LINE);
+        return getAllStreamed(networkId, variantNum, mappings.getHvdcLineMappings(), limit,
+            () -> repository.getHvdcLines(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/hvdc-lines/{hvdcLineId}", produces = APPLICATION_JSON_VALUE)
@@ -1389,10 +1430,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/grounds", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get grounds")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get ground list"))
-    public ResponseEntity<TopLevelDocument<GroundAttributes>> getGrounds(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getGrounds(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                          @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                                                          @Parameter(description = "Max number of grounds to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getGrounds(networkId, variantNum), limit, ResourceType.GROUND);
+        return getAllStreamed(networkId, variantNum, mappings.getGroundMappings(), limit,
+            () -> repository.getGrounds(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/grounds/{groundId}", produces = APPLICATION_JSON_VALUE)
@@ -1448,10 +1490,11 @@ public class NetworkStoreController {
     @GetMapping(value = "/{networkId}/{variantNum}/configured-buses", produces = APPLICATION_JSON_VALUE)
     @Operation(summary = "Get buses")
     @ApiResponses(@ApiResponse(responseCode = "200", description = "Successfully get buses list"))
-    public ResponseEntity<TopLevelDocument<ConfiguredBusAttributes>> getBuses(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
+    public ResponseEntity<StreamingResponseBody> getBuses(@Parameter(description = "Network ID", required = true) @PathVariable("networkId") UUID networkId,
                                                                               @Parameter(description = "Variant number", required = true) @PathVariable("variantNum") int variantNum,
                                                                               @Parameter(description = "Max number of buses to get") @RequestParam(required = false) Integer limit) {
-        return getAll(() -> repository.getConfiguredBuses(networkId, variantNum), limit, ResourceType.CONFIGURED_BUS);
+        return getAllStreamed(networkId, variantNum, mappings.getConfiguredBusMappings(), limit,
+            () -> repository.getConfiguredBuses(networkId, variantNum));
     }
 
     @GetMapping(value = "/{networkId}/{variantNum}/configured-buses/{busId}", produces = APPLICATION_JSON_VALUE)
