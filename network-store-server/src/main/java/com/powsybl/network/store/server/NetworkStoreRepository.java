@@ -1695,7 +1695,7 @@ public class NetworkStoreRepository {
      * resolve in memory) and every column type is streamable.
      */
     public boolean canStreamCollection(UUID networkUuid, int variantNum, TableMapping tableMapping) {
-        if (!IdentifiableCollectionJsonWriter.supports(tableMapping)) {
+        if (collectionWriter(tableMapping).isEmpty()) {
             return false;
         }
         try (var connection = dataSource.getConnection()) {
@@ -1704,6 +1704,24 @@ public class NetworkStoreRepository {
         } catch (SQLException e) {
             throw new UncheckedSqlException(e);
         }
+    }
+
+    // writer construction probes the table's column-to-property resolution once; a table
+    // it cannot handle is cached as empty and its endpoint stays on the POJO path
+    private final Map<String, Optional<IdentifiableCollectionJsonWriter>> collectionWriters = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private Optional<IdentifiableCollectionJsonWriter> collectionWriter(TableMapping tableMapping) {
+        return collectionWriters.computeIfAbsent(tableMapping.getTable(), table -> {
+            if (!IdentifiableCollectionJsonWriter.supports(tableMapping)) {
+                return Optional.empty();
+            }
+            try {
+                return Optional.of(new IdentifiableCollectionJsonWriter(mapper, tableMapping));
+            } catch (IllegalStateException | ClassCastException e) {
+                LOGGER.warn("Collection streaming disabled for table {}: {}", tableMapping.getTable(), e.getMessage());
+                return Optional.empty();
+            }
+        });
     }
 
     /**
@@ -1723,7 +1741,7 @@ public class NetworkStoreRepository {
                 preparedStmt.setObject(1, networkUuid);
                 preparedStmt.setInt(2, variantNum);
                 try (ResultSet resultSet = preparedStmt.executeQuery()) {
-                    return new IdentifiableCollectionJsonWriter(mapper, tableMapping).write(resultSet, variantNum, limit, out);
+                    return collectionWriter(tableMapping).orElseThrow().write(resultSet, variantNum, limit, out);
                 }
             } finally {
                 connection.commit();

@@ -65,10 +65,17 @@ public class IdentifiableCollectionJsonWriter {
         IdentifiableAttributes defaultInstance = tableMapping.getAttributesSupplier().get();
         ObjectNode defaults = (ObjectNode) mapper.valueToTree(defaultInstance);
 
+        // column keys usually equal the serialized property name, but not always
+        // ("identifiableShortCircuit" -> identifiableShortCircuitAttributes,
+        // "fictitiousp0" -> fictitiousP0), so each column is resolved empirically: set
+        // a sentinel through the column's own setter on a probe instance, serialize it
+        // and see which property changed. Exactly one property must change, otherwise
+        // the table is refused (and the endpoint falls back to the POJO path).
         Map<String, Column> columnsByField = new java.util.HashMap<>();
         int sqlIndex = 2; // first selected column is the id
         for (Map.Entry<String, ColumnMapping> e : tableMapping.getColumnsMapping().entrySet()) {
-            columnsByField.put(e.getKey(), new Column(e.getKey(), sqlIndex++, kindOf(e.getValue())));
+            String property = resolveSerializedProperty(mapper, tableMapping, e.getKey(), e.getValue(), defaults);
+            columnsByField.put(property, new Column(property, sqlIndex++, kindOf(e.getValue())));
         }
 
         try {
@@ -90,13 +97,85 @@ public class IdentifiableCollectionJsonWriter {
             throw new IllegalStateException("Cannot introspect serializer of " + defaultInstance.getClass(), e);
         }
 
-        // a column that is not a serialized property (e.g. @JsonIgnore'd getter) would
-        // silently be dropped from responses: refuse instead
-        for (String column : tableMapping.getColumnsMapping().keySet()) {
-            if (fieldWriters.stream().noneMatch(w -> w.name().equals(column))) {
-                throw new IllegalStateException("Column " + column + " of table " + tableMapping.getTable()
-                        + " has no matching serialized field; streaming would drop it");
+        // every column must have landed on a serialized property, or responses would drop it
+        for (String property : columnsByField.keySet()) {
+            if (fieldWriters.stream().noneMatch(w -> property.equals(w.name()))) {
+                throw new IllegalStateException("Column property " + property + " of table " + tableMapping.getTable()
+                        + " is not a serialized field; streaming would drop it");
             }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String resolveSerializedProperty(ObjectMapper mapper, TableMapping tableMapping,
+                                                    String columnName, ColumnMapping columnMapping, ObjectNode defaults) {
+        // two probes: a non-null sentinel (distinguishes fields whose default is
+        // null/false/NaN) and null (distinguishes fields default-initialized to a
+        // non-null value like an empty list, which the first probe cannot move)
+        List<String> changed = diffProbe(mapper, tableMapping, columnMapping, defaults, sentinelFor(columnMapping));
+        if (changed.isEmpty()) {
+            changed = diffProbe(mapper, tableMapping, columnMapping, defaults, null);
+        }
+        if (changed.size() != 1) {
+            throw new IllegalStateException("Column " + columnName + " of table " + tableMapping.getTable()
+                    + " maps to " + changed + " serialized properties; streaming needs exactly one");
+        }
+        return changed.get(0);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> diffProbe(ObjectMapper mapper, TableMapping tableMapping,
+                                          ColumnMapping columnMapping, ObjectNode defaults, Object sentinel) {
+        IdentifiableAttributes probe = tableMapping.getAttributesSupplier().get();
+        columnMapping.set(probe, sentinel);
+        ObjectNode probed = (ObjectNode) mapper.valueToTree(probe);
+        List<String> changed = new ArrayList<>();
+        probed.fieldNames().forEachRemaining(name -> {
+            if (!probed.get(name).equals(defaults.get(name))) {
+                changed.add(name);
+            }
+        });
+        defaults.fieldNames().forEachRemaining(name -> {
+            if (!probed.has(name)) {
+                changed.add(name);
+            }
+        });
+        return changed;
+    }
+
+    private static Object sentinelFor(ColumnMapping<?, ?, ?, ?, ?> columnMapping) {
+        if (columnMapping.getClassMapKey() != null && columnMapping.getClassMapValue() != null) {
+            return Map.of();
+        }
+        Class<?> classR = columnMapping.getClassR();
+        if (classR == String.class) {
+            return "streaming-probe";
+        }
+        if (classR == Boolean.class) {
+            return Boolean.TRUE;
+        }
+        if (classR == Integer.class) {
+            return 7;
+        }
+        if (classR == Double.class) {
+            return 1.25;
+        }
+        if (classR.isEnum()) {
+            return classR.getEnumConstants()[0];
+        }
+        if (java.util.Set.class.isAssignableFrom(classR)) {
+            return java.util.Set.of();
+        }
+        if (List.class.isAssignableFrom(classR)) {
+            return List.of();
+        }
+        if (Map.class.isAssignableFrom(classR)) {
+            return Map.of();
+        }
+        try {
+            return classR.getDeclaredConstructor().newInstance();
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("No sentinel for column type " + classR, e);
         }
     }
 
