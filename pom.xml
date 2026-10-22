@@ -20,7 +20,7 @@
     </parent>
 
     <artifactId>powsybl-network-store-server-parent</artifactId>
-    <version>2.38.0-SNAPSHOT</version>
+    <version>2.43.0-SNAPSHOT</version>
 
     <packaging>pom</packaging>
     <name>Network store server parent</name>
@@ -48,8 +48,20 @@
     </developers>
 
     <properties>
+        <!-- FIXME to remove when powsybl-parent supports JDK25 -->
+        <java.version>25</java.version>
+        <maven.jacoco.version>0.8.15</maven.jacoco.version>
+        <checkstyle.version>13.8.0</checkstyle.version>
+        <maven.jib.version>3.5.1</maven.jib.version>
+        <jib.from.image>powsybl/java:4.0.0</jib.from.image>
         <sirocco.version>1.0</sirocco.version>
-        <powsybl-ws-dependencies.version>2.32.0</powsybl-ws-dependencies.version>
+        <powsybl-ws-dependencies.version>2.34.0</powsybl-ws-dependencies.version>
+        <!-- powsybl-core 7.4.0 (its voltage regulation API, IIDM 1.18) with the tcb extensions, and the network store
+             client implementing them: overrides of powsybl-ws-dependencies -->
+        <powsybl-core.version>7.4.0-tcb-SNAPSHOT</powsybl-core.version>
+        <powsybl-network-store.version>1.52.0-SNAPSHOT</powsybl-network-store.version>
+        <!-- powsybl-dynawo built on the powsybl-core above, whose extensions the network store implements -->
+        <powsybl-dynawo.version>3.4.0-tcb-SNAPSHOT</powsybl-dynawo.version>
         <!-- FIXME : to remove when sonar version is updated on github actions -->
         <!-- https://community.sonarsource.com/t/stackoverflowerror-at-defaultinputcomponent-equals/20324 -->
         <!-- The versions are very different from this post. But the fix works again. Maybe a similar problem in sonar code -->
@@ -65,8 +77,6 @@
         <sonar.cpd.exclusions>**/migration/**/*</sonar.cpd.exclusions>
         <sonar.organization>powsybl-ci-github</sonar.organization>
         <sonar.projectKey>com.powsybl:powsybl-network-store-server</sonar.projectKey>
-        <!-- FIXME: powsybl-network-store modules'version is overloaded in the dependencies section.The overloads and this property below have to be removed at next powsybl-ws-dependencies.version upgrade -->
-        <powsybl-network-store.version>1.46.0</powsybl-network-store.version>
     </properties>
 
     <modules>
@@ -78,19 +88,24 @@
 
     <dependencyManagement>
         <dependencies>
-            <!-- FIXME: to be removed at next powsybl-ws-dependencies upgrade  -->
+            <!-- overrides of imports -->
+            <dependency>
+                <groupId>com.powsybl</groupId>
+                <artifactId>powsybl-core</artifactId>
+                <version>${powsybl-core.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>com.powsybl</groupId>
                 <artifactId>powsybl-network-store-client</artifactId>
                 <version>${powsybl-network-store.version}</version>
             </dependency>
-            <!-- FIXME: to be removed at next powsybl-ws-dependencies upgrade  -->
             <dependency>
                 <groupId>com.powsybl</groupId>
                 <artifactId>powsybl-network-store-iidm-impl</artifactId>
                 <version>${powsybl-network-store.version}</version>
             </dependency>
-            <!-- FIXME: to be removed at next powsybl-ws-dependencies upgrade  -->
             <dependency>
                 <groupId>com.powsybl</groupId>
                 <artifactId>powsybl-network-store-model</artifactId>
@@ -98,11 +113,18 @@
             </dependency>
             <dependency>
                 <groupId>com.powsybl</groupId>
+                <artifactId>powsybl-dynawo-extensions-api</artifactId>
+                <version>${powsybl-dynawo.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.powsybl</groupId>
                 <artifactId>powsybl-ws-dependencies</artifactId>
                 <version>${powsybl-ws-dependencies.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+
 
             <!-- project specific dependencies -->
             <dependency>
