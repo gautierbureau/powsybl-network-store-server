@@ -56,6 +56,10 @@
         <jib.from.image>powsybl/java:4.0.0</jib.from.image>
         <sirocco.version>1.0</sirocco.version>
         <powsybl-ws-dependencies.version>2.34.0</powsybl-ws-dependencies.version>
+        <!-- powsybl-core 7.4.0 (its voltage regulation API, IIDM 1.18) with the tcb extensions, and the network store
+             client implementing them: overrides of powsybl-ws-dependencies -->
+        <powsybl-core.version>7.4.0-tcb-SNAPSHOT</powsybl-core.version>
+        <powsybl-network-store.version>1.52.0-SNAPSHOT</powsybl-network-store.version>
         <!-- FIXME : to remove when sonar version is updated on github actions -->
         <!-- https://community.sonarsource.com/t/stackoverflowerror-at-defaultinputcomponent-equals/20324 -->
         <!-- The versions are very different from this post. But the fix works again. Maybe a similar problem in sonar code -->
@@ -82,6 +86,30 @@
 
     <dependencyManagement>
         <dependencies>
+            <!-- overrides of imports -->
+            <dependency>
+                <groupId>com.powsybl</groupId>
+                <artifactId>powsybl-core</artifactId>
+                <version>${powsybl-core.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.powsybl</groupId>
+                <artifactId>powsybl-network-store-client</artifactId>
+                <version>${powsybl-network-store.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.powsybl</groupId>
+                <artifactId>powsybl-network-store-iidm-impl</artifactId>
+                <version>${powsybl-network-store.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.powsybl</groupId>
+                <artifactId>powsybl-network-store-model</artifactId>
+                <version>${powsybl-network-store.version}</version>
+            </dependency>
+
             <dependency>
                 <groupId>com.powsybl</groupId>
                 <artifactId>powsybl-ws-dependencies</artifactId>

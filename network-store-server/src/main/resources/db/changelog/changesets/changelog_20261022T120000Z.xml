@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                   https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+    <!-- powsybl-core 7.4.0: voltage regulation of the regulating equipments (powsybl-core#3699), and equivalent
+         identifiables (IIDM 1.18, powsybl-core#4063). The former targets and regulation values are not migrated. -->
+    <changeSet author="claude" id="20261022120000-1">
+        <addColumn tableName="regulatingpoint">
+            <column name="targetvalue" type="FLOAT8"/>
+            <column name="targetdeadband" type="FLOAT8"/>
+            <column name="slope" type="FLOAT8"/>
+        </addColumn>
+    </changeSet>
+    <changeSet author="claude" id="20261022120000-2">
+        <addColumn tableName="generator">
+            <column name="localtargetv" type="FLOAT8"/>
+            <column name="localtargetq" type="FLOAT8"/>
+        </addColumn>
+        <addColumn tableName="battery">
+            <column name="localtargetv" type="FLOAT8"/>
+            <column name="localtargetq" type="FLOAT8"/>
+        </addColumn>
+        <addColumn tableName="shuntcompensator">
+            <column name="localtargetv" type="FLOAT8"/>
+        </addColumn>
+        <addColumn tableName="vscconverterstation">
+            <column name="localtargetv" type="FLOAT8"/>
+            <column name="localtargetq" type="FLOAT8"/>
+        </addColumn>
+        <addColumn tableName="staticvarcompensator">
+            <column name="localtargetv" type="FLOAT8"/>
+            <column name="localtargetq" type="FLOAT8"/>
+        </addColumn>
+    </changeSet>
+    <changeSet author="claude" id="20261022120000-3">
+        <addColumn tableName="network">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="substation">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="voltagelevel">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="generator">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="battery">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="shuntcompensator">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="vscconverterstation">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="lccconverterstation">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="staticvarcompensator">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="busbarsection">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="switch">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="twowindingstransformer">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="threewindingstransformer">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="hvdcline">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="boundaryline">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="configuredbus">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="load">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="line">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="tieline">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="ground">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+        <addColumn tableName="area">
+            <column name="equivalent" type="BOOLEAN"/>
+        </addColumn>
+    </changeSet>
+</databaseChangeLog>

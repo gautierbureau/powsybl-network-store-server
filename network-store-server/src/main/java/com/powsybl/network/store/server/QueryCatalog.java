@@ -51,6 +51,8 @@ public final class QueryCatalog {
     static final String REGULATION_MODE = "regulationMode";
     private static final String TYPE_COLUMN = "type";
     static final String REGULATING = "regulating";
+    // the target value, deadband and slope of a voltage regulation, null for a regulating point without voltage regulation
+    static final String VOLTAGE_REGULATION_COLUMNS = "targetValue, targetDeadband, slope";
     private static final Predicate<String> CLONE_PREDICATE = column -> !column.equals(UUID_COLUMN) && !column.equals(VARIANT_ID_COLUMN)
             && !column.equals(NAME_COLUMN) && !column.equals(FULL_VARIANT_NUM_COLUMN);
     private static final String TOMBSTONED_IDENTIFIABLE_TABLE = "tombstonedidentifiable";
@@ -564,18 +566,18 @@ public final class QueryCatalog {
             NETWORK_UUID_COLUMN + " ," + VARIANT_NUM_COLUMN + ", " + REGULATING_EQUIPMENT_ID + ", " + REGULATING_EQUIPMENT_TYPE_COLUMN + ", " +
             REGULATING_TAP_CHANGER_TYPE + ", " + REGULATION_MODE +
             ", localTerminalConnectableId, localTerminalSide, regulatingterminalconnectableid, regulatingterminalside, " +
-            REGULATED_EQUIPMENT_TYPE_COLUMN + ", " + REGULATING + ")" +
-            " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            REGULATED_EQUIPMENT_TYPE_COLUMN + ", " + REGULATING + ", " + VOLTAGE_REGULATION_COLUMNS + ")" +
+            " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     }
 
     public static String buildCloneRegulatingPointsQuery() {
         return "insert into " + REGULATING_POINT_TABLE + " (" + NETWORK_UUID_COLUMN + " ," + VARIANT_NUM_COLUMN + ", " +
              REGULATING_EQUIPMENT_ID + ", " + REGULATING_EQUIPMENT_TYPE_COLUMN + ", " + REGULATING_TAP_CHANGER_TYPE + ", " + REGULATION_MODE +
             ", localTerminalConnectableId, localTerminalSide, regulatingTerminalConnectableId, regulatingTerminalSide, " +
-            REGULATED_EQUIPMENT_TYPE_COLUMN + ", " + REGULATING + ") select ?, ?" + ", " + REGULATING_EQUIPMENT_ID + ", " +
+            REGULATED_EQUIPMENT_TYPE_COLUMN + ", " + REGULATING + ", " + VOLTAGE_REGULATION_COLUMNS + ") select ?, ?" + ", " + REGULATING_EQUIPMENT_ID + ", " +
             REGULATING_EQUIPMENT_TYPE_COLUMN + ", " + REGULATING_TAP_CHANGER_TYPE + ", " + REGULATION_MODE +
             ", localTerminalConnectableId, localTerminalSide, regulatingTerminalConnectableId, regulatingTerminalSide, "
-            + REGULATED_EQUIPMENT_TYPE_COLUMN + ", " + REGULATING + " from " + REGULATING_POINT_TABLE + " where " + NETWORK_UUID_COLUMN +
+            + REGULATED_EQUIPMENT_TYPE_COLUMN + ", " + REGULATING + ", " + VOLTAGE_REGULATION_COLUMNS + " from " + REGULATING_POINT_TABLE + " where " + NETWORK_UUID_COLUMN +
             " = ? and " + VARIANT_NUM_COLUMN + " = ?";
     }
 
@@ -584,7 +586,7 @@ public final class QueryCatalog {
             NETWORK_UUID_COLUMN + ", " +
             VARIANT_NUM_COLUMN + ", " +
             REGULATING_EQUIPMENT_ID + ", " + REGULATING_TAP_CHANGER_TYPE + ", " + REGULATION_MODE + ", localterminalconnectableid, localterminalside, " +
-            "regulatingterminalconnectableid, regulatingterminalside, " + REGULATING +
+            "regulatingterminalconnectableid, regulatingterminalside, " + REGULATING + ", " + VOLTAGE_REGULATION_COLUMNS +
             " from " + REGULATING_POINT_TABLE + " where " +
             NETWORK_UUID_COLUMN + " = ? and " +
             VARIANT_NUM_COLUMN + " = ? and " +
@@ -602,7 +604,7 @@ public final class QueryCatalog {
         return "select " + NETWORK_UUID_COLUMN + ", " +
             VARIANT_NUM_COLUMN + ", " +
             REGULATING_EQUIPMENT_ID + ", " + REGULATING_TAP_CHANGER_TYPE + ", " + REGULATION_MODE + ", localterminalconnectableid, localterminalside, " +
-            "regulatingterminalconnectableid, regulatingterminalside, " + REGULATING
+            "regulatingterminalconnectableid, regulatingterminalside, " + REGULATING + ", " + VOLTAGE_REGULATION_COLUMNS
             + " from " + REGULATING_POINT_TABLE + " where " +
             NETWORK_UUID_COLUMN + " = ? and " +
             VARIANT_NUM_COLUMN + " = ? and " +
