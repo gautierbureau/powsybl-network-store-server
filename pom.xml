@@ -60,6 +60,8 @@
              client implementing them: overrides of powsybl-ws-dependencies -->
         <powsybl-core.version>7.4.0-tcb-SNAPSHOT</powsybl-core.version>
         <powsybl-network-store.version>1.52.0-SNAPSHOT</powsybl-network-store.version>
+        <!-- powsybl-dynawo built on the powsybl-core above, whose extensions the network store implements -->
+        <powsybl-dynawo.version>3.4.0-tcb-SNAPSHOT</powsybl-dynawo.version>
         <!-- FIXME : to remove when sonar version is updated on github actions -->
         <!-- https://community.sonarsource.com/t/stackoverflowerror-at-defaultinputcomponent-equals/20324 -->
         <!-- The versions are very different from this post. But the fix works again. Maybe a similar problem in sonar code -->
@@ -108,6 +110,11 @@
                 <groupId>com.powsybl</groupId>
                 <artifactId>powsybl-network-store-model</artifactId>
                 <version>${powsybl-network-store.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.powsybl</groupId>
+                <artifactId>powsybl-dynawo-extensions-api</artifactId>
+                <version>${powsybl-dynawo.version}</version>
             </dependency>
 
             <dependency>
